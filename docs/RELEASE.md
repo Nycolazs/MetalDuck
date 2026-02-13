@@ -9,6 +9,10 @@ bash scripts/create_release.sh
 Generated artifact:
 - `dist/MetalDuck-macos-arm64.dmg`
 
+DMG contents:
+- `MetalDuck.app`
+- `Applications` shortcut (drag-and-drop install flow)
+
 ## Publish to GitHub Releases
 
 Example:

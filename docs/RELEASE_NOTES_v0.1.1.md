@@ -4,6 +4,9 @@
 
 - Release asset is now distributed as a native macOS `.dmg` instead of `.zip`.
 - Added/updated release tooling script to generate DMG directly.
+- DMG now contains installer-style layout:
+  - `MetalDuck.app`
+  - `Applications` shortcut for drag-and-drop install.
 
 ## Included improvements
 
@@ -13,5 +16,5 @@
 ## Run after mounting DMG
 
 1. Mount `MetalDuck-macos-arm64.dmg`.
-2. Open the mounted volume.
-3. Run `MetalDuck` (keep `MetalDuck_MetalDuck.bundle` in the same folder).
+2. Drag `MetalDuck.app` to `Applications`.
+3. Open MetalDuck from `/Applications`.

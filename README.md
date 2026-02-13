@@ -64,6 +64,12 @@ bash scripts/create_release.sh
 Output:
 - `dist/MetalDuck-macos-arm64.dmg`
 
+## Install from DMG
+
+1. Open `MetalDuck-macos-arm64.dmg`.
+2. Drag `MetalDuck.app` to `Applications`.
+3. Open `MetalDuck` from Launchpad or `/Applications`.
+
 ## Quick start (30 -> 60 FPS browser test)
 
 1. Open a true 30 FPS video in your browser.
