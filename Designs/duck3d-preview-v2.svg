@@ -1,0 +1,77 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg2" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(350 220) rotate(42) scale(980)">
+      <stop offset="0" stop-color="#26374E"/>
+      <stop offset="0.58" stop-color="#142033"/>
+      <stop offset="1" stop-color="#090F1A"/>
+    </radialGradient>
+
+    <linearGradient id="goldSteel" x1="260" y1="350" x2="760" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF1BF"/>
+      <stop offset="0.18" stop-color="#F8D86F"/>
+      <stop offset="0.38" stop-color="#D1A94D"/>
+      <stop offset="0.58" stop-color="#A77F36"/>
+      <stop offset="0.76" stop-color="#E7CA73"/>
+      <stop offset="1" stop-color="#8D6B2A"/>
+    </linearGradient>
+
+    <linearGradient id="goldHead" x1="610" y1="250" x2="885" y2="560" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF8D9"/>
+      <stop offset="0.35" stop-color="#F4D372"/>
+      <stop offset="0.65" stop-color="#BD943E"/>
+      <stop offset="1" stop-color="#8A6627"/>
+    </linearGradient>
+
+    <linearGradient id="wing2" x1="435" y1="520" x2="626" y2="668" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F3DA86"/>
+      <stop offset="1" stop-color="#A67D34"/>
+    </linearGradient>
+
+    <linearGradient id="beak2" x1="780" y1="410" x2="948" y2="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFC79D"/>
+      <stop offset="0.5" stop-color="#EE8C52"/>
+      <stop offset="1" stop-color="#A84B1B"/>
+    </linearGradient>
+
+    <filter id="shadow2" x="120" y="560" width="820" height="300" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+  </defs>
+
+  <rect x="30" y="30" width="964" height="964" rx="210" fill="url(#bg2)"/>
+  <rect x="30" y="30" width="964" height="964" rx="210" stroke="rgba(255,255,255,0.12)" stroke-width="10"/>
+
+  <ellipse cx="520" cy="730" rx="325" ry="78" fill="#000" opacity="0.36" filter="url(#shadow2)"/>
+
+  <!-- toy-like body -->
+  <path d="M238 614C238 505 332 426 450 426H565C716 426 840 515 840 631C840 728 764 790 648 790H408C314 790 238 717 238 614Z" fill="url(#goldSteel)" stroke="#5B4418" stroke-width="10"/>
+
+  <!-- tail bump -->
+  <path d="M255 595C232 603 214 626 220 652C241 637 262 631 292 627" fill="#C39A45" stroke="#6E5520" stroke-width="6"/>
+
+  <!-- neck -->
+  <ellipse cx="664" cy="490" rx="80" ry="64" fill="#D2AE5A" stroke="#6A5020" stroke-width="8"/>
+
+  <!-- head -->
+  <circle cx="742" cy="392" r="132" fill="url(#goldHead)" stroke="#5B4418" stroke-width="10"/>
+
+  <!-- beak -->
+  <path d="M808 430C882 449 936 444 962 420C954 392 924 377 882 376C845 375 815 386 792 403" fill="url(#beak2)" stroke="#7D3413" stroke-width="8"/>
+  <path d="M800 411C872 425 924 420 949 401" stroke="rgba(255,255,255,0.42)" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- wing -->
+  <path d="M430 562C486 528 566 547 610 609C555 657 475 663 426 616C416 603 418 575 430 562Z" fill="url(#wing2)" stroke="#6A5020" stroke-width="8"/>
+
+  <!-- eye -->
+  <circle cx="767" cy="361" r="17" fill="#131417"/>
+  <circle cx="773" cy="355" r="5" fill="#FFFFFF"/>
+
+  <!-- strong 3D highlights -->
+  <path d="M312 542C410 456 570 440 696 493" stroke="rgba(255,255,255,0.48)" stroke-width="22" stroke-linecap="round"/>
+  <path d="M673 294C730 262 793 286 837 335" stroke="rgba(255,255,255,0.5)" stroke-width="16" stroke-linecap="round"/>
+  <path d="M462 617C511 581 573 579 625 613" stroke="rgba(255,255,255,0.34)" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- cool metal reflections -->
+  <ellipse cx="458" cy="703" rx="188" ry="64" fill="rgba(108,163,255,0.16)"/>
+  <ellipse cx="612" cy="700" rx="132" ry="42" fill="rgba(255,229,170,0.18)"/>
+</svg>

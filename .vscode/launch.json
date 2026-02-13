@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MetalDuck}",
+            "name": "Debug MetalDuck",
+            "target": "MetalDuck",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug MetalDuck"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MetalDuck}",
+            "name": "Release MetalDuck",
+            "target": "MetalDuck",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release MetalDuck"
+        }
+    ]
+}

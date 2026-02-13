@@ -1,0 +1,85 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(340 280) rotate(40) scale(980)">
+      <stop offset="0" stop-color="#2E425B"/>
+      <stop offset="0.55" stop-color="#182739"/>
+      <stop offset="1" stop-color="#0B1320"/>
+    </radialGradient>
+
+    <linearGradient id="steelBody" x1="240" y1="320" x2="760" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F5F8FC"/>
+      <stop offset="0.17" stop-color="#C8D3DF"/>
+      <stop offset="0.4" stop-color="#9AA8B8"/>
+      <stop offset="0.6" stop-color="#7D8C9F"/>
+      <stop offset="0.8" stop-color="#B9C4CF"/>
+      <stop offset="1" stop-color="#667488"/>
+    </linearGradient>
+
+    <linearGradient id="steelHead" x1="580" y1="220" x2="860" y2="540" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FAFCFF"/>
+      <stop offset="0.28" stop-color="#CFD8E3"/>
+      <stop offset="0.56" stop-color="#99A6B6"/>
+      <stop offset="1" stop-color="#6B7A90"/>
+    </linearGradient>
+
+    <linearGradient id="wing" x1="420" y1="470" x2="610" y2="660" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E6ECF3"/>
+      <stop offset="1" stop-color="#7F8D9F"/>
+    </linearGradient>
+
+    <linearGradient id="beak" x1="760" y1="390" x2="930" y2="470" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFD78E"/>
+      <stop offset="0.45" stop-color="#F5A64E"/>
+      <stop offset="1" stop-color="#BB5C1F"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="140" y="560" width="760" height="260" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+
+    <filter id="innerGlow" x="0" y="0" width="1024" height="1024" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="1.3" result="blur"/>
+      <feBlend in="SourceGraphic" in2="blur" mode="screen"/>
+    </filter>
+  </defs>
+
+  <rect x="28" y="28" width="968" height="968" rx="200" fill="url(#bg)"/>
+  <rect x="28" y="28" width="968" height="968" rx="200" stroke="rgba(255,255,255,0.12)" stroke-width="10"/>
+
+  <ellipse cx="510" cy="710" rx="300" ry="68" fill="#000" opacity="0.38" filter="url(#softShadow)"/>
+
+  <!-- body -->
+  <path d="M228 590C228 492 310 420 408 420H560C698 420 816 508 816 618C816 706 746 764 642 764H396C302 764 228 692 228 590Z" fill="url(#steelBody)" stroke="#2C3644" stroke-width="10"/>
+
+  <!-- tail plate -->
+  <path d="M258 560C223 578 205 609 214 646C232 627 252 617 286 612" fill="#A3B1C1"/>
+
+  <!-- wing -->
+  <path d="M410 548C460 514 538 530 580 588C532 634 458 640 410 600C400 588 400 562 410 548Z" fill="url(#wing)" stroke="#546274" stroke-width="8"/>
+
+  <!-- neck connector -->
+  <ellipse cx="648" cy="476" rx="72" ry="56" fill="#B6C2D0" stroke="#425064" stroke-width="8"/>
+
+  <!-- head -->
+  <circle cx="716" cy="386" r="124" fill="url(#steelHead)" stroke="#2C3644" stroke-width="10"/>
+
+  <!-- beak -->
+  <path d="M786 426C856 444 912 440 940 418C932 390 902 374 860 372C822 370 792 382 770 398" fill="url(#beak)" stroke="#85421A" stroke-width="8"/>
+  <path d="M780 408C850 420 902 416 926 398" stroke="rgba(255,255,255,0.45)" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- eye -->
+  <circle cx="737" cy="356" r="16" fill="#111317"/>
+  <circle cx="742" cy="350" r="5" fill="#FFFFFF"/>
+
+  <!-- glossy reflections -->
+  <path d="M308 520C392 450 536 430 650 470" stroke="rgba(255,255,255,0.42)" stroke-width="20" stroke-linecap="round"/>
+  <path d="M644 290C700 260 760 282 800 326" stroke="rgba(255,255,255,0.42)" stroke-width="15" stroke-linecap="round"/>
+  <path d="M450 596C500 560 560 558 612 590" stroke="rgba(255,255,255,0.32)" stroke-width="10" stroke-linecap="round"/>
+
+  <!-- chrome tint -->
+  <ellipse cx="430" cy="675" rx="180" ry="58" fill="rgba(84,134,255,0.12)"/>
+
+  <g filter="url(#innerGlow)">
+    <rect x="34" y="34" width="956" height="956" rx="194" stroke="rgba(255,255,255,0.08)" stroke-width="5"/>
+  </g>
+</svg>
