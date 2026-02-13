@@ -7,7 +7,7 @@ bash scripts/create_release.sh
 ```
 
 Generated artifact:
-- `dist/MetalDuck-macos-arm64.zip`
+- `dist/MetalDuck-macos-arm64.dmg`
 
 ## Publish to GitHub Releases
 
@@ -18,7 +18,7 @@ git tag -a v0.1.0 -m "MetalDuck v0.1.0"
 git push origin main --tags
 
 gh release create v0.1.0 \
-  dist/MetalDuck-macos-arm64.zip \
+  dist/MetalDuck-macos-arm64.dmg \
   --title "MetalDuck v0.1.0" \
   --notes-file docs/RELEASE_NOTES_v0.1.0.md
 ```

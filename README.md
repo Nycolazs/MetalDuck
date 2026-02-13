@@ -55,14 +55,14 @@ SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk swift run
 ./.build/release/MetalDuck
 ```
 
-## Create a distributable release zip
+## Create a distributable release DMG
 
 ```bash
 bash scripts/create_release.sh
 ```
 
 Output:
-- `dist/MetalDuck-macos-arm64.zip`
+- `dist/MetalDuck-macos-arm64.dmg`
 
 ## Quick start (30 -> 60 FPS browser test)
 

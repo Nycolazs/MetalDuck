@@ -24,7 +24,7 @@ if [[ ! -f "$PRODUCT_BIN" ]]; then
 fi
 
 STAGE_DIR="$ROOT_DIR/dist/MetalDuck-macos-arm64"
-ZIP_PATH="$ROOT_DIR/dist/MetalDuck-macos-arm64.zip"
+DMG_PATH="$ROOT_DIR/dist/MetalDuck-macos-arm64.dmg"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
@@ -37,10 +37,12 @@ cp "$ROOT_DIR/README.md" "$STAGE_DIR/"
 cp -R "$ROOT_DIR/docs" "$STAGE_DIR/"
 cp "$ROOT_DIR/LICENSE" "$STAGE_DIR/"
 
-rm -f "$ZIP_PATH"
-(
-  cd "$ROOT_DIR/dist"
-  zip -r "$(basename "$ZIP_PATH")" "$(basename "$STAGE_DIR")" >/dev/null
-)
+rm -f "$DMG_PATH"
+hdiutil create \
+  -volname "MetalDuck" \
+  -srcfolder "$STAGE_DIR" \
+  -ov \
+  -format UDZO \
+  "$DMG_PATH" >/dev/null
 
-echo "Release package created: $ZIP_PATH"
+echo "Release package created: $DMG_PATH"
