@@ -17,14 +17,15 @@ enum FrameGenerationMode: String, CaseIterable {
 
 struct RenderSettings {
     var upscalingAlgorithm: UpscalingAlgorithm = .metalFXSpatial
-    var outputScale: Float = 1.5
+    var outputScale: Float = 1.0
+    var matchOutputResolution: Bool = true
     var samplingMode: SamplingMode = .linear
-    var sharpness: Float = 0.15
-    var dynamicResolutionEnabled: Bool = true
+    var sharpness: Float = 0.0
+    var dynamicResolutionEnabled: Bool = false
     var dynamicScaleMinimum: Float = 0.75
     var dynamicScaleMaximum: Float = 1.0
-    var targetPresentationFPS: Int = 120
-    var frameGenerationEnabled: Bool = false
+    var targetPresentationFPS: Int = 60
+    var frameGenerationEnabled: Bool = true
     var frameGenerationMode: FrameGenerationMode = .x2
 }
 

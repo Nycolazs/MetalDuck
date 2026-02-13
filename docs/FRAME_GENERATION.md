@@ -2,29 +2,25 @@
 
 ## Current implementation
 
-MetalDuck currently supports two FG paths:
+MetalDuck uses a GPU optical-flow interpolation pipeline:
 
-1. **MetalFX interpolation path** (preferred)
-- Requires device/API support and auxiliary inputs (motion/depth/UI).
-- In this project state, this path is prepared but effectively unavailable in the current SDK/runtime setup.
+1. Estimate block motion (`previous` -> `current`) with a compute shader.
+2. Build a low-resolution flow texture.
+3. Warp both frames toward interpolation time (`t`) in a render pass.
+4. Blend warped frames, with fallback stabilization for mismatch-heavy regions.
 
-2. **Blend interpolation fallback** (active)
-- Uses previous + current upscaled frame and blends them.
-- Modes:
-  - `2x`: one inserted frame at blend factor `0.5`
-  - `3x`: two inserted frames at blend factors `1/3` and `2/3`
+Modes:
+- `2x`: inserts one generated frame between source frames.
+- `3x`: inserts two generated frames between source frames.
 
-## Quality expectations
+## Why quality differs from game-integrated FG
 
-- Works for smooth motion uplift in many desktop/video scenarios.
-- Can produce ghosting/halo artifacts on fast motion or occlusion-heavy scenes.
-- This is expected without true optical flow / game-native motion vectors.
+Desktop capture does not provide reliable per-pixel game motion vectors, depth, and UI layers.
+Because of that, hard occlusions and very fast motion can still show artifacts.
 
-## Why game integration matters
+## Practical guidance
 
-High quality FG needs consistent:
-- motion vectors,
-- depth,
-- UI isolation.
-
-Desktop capture alone does not provide that reliably.
+For best visual results:
+- Keep source visible (avoid browser/background throttling).
+- Use `Capture FPS = 30` + `FG 2x` + `Target FPS = 60` for 30->60.
+- Use `FG 3x` only when the source cadence is stable and GPU headroom is available.

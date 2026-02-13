@@ -1,48 +1,57 @@
 # Usage
 
-## Start
+## Start a session
 
-1. Launch the app.
-2. Grant **Screen Recording** permission when requested.
-3. Click `Refresh` to reload capture sources.
+1. Launch MetalDuck.
+2. Grant Screen Recording permission if prompted.
+3. Click `Refresh` to load capture targets.
+4. Select mode/source and press `Scale`.
 
 ## Capture modes
 
-- `Automatic`: prefers visible windows.
-- `Display`: captures a whole display.
-- `Window`: captures a specific window.
+- `Automatic`: picks a valid source automatically.
+- `Display`: capture an entire monitor.
+- `Window`: capture one specific app window.
 
-## Core controls
+## Output behavior
 
-- `Capture FPS`: input capture rate.
-- `Queue Depth`: stream buffering depth.
-- `Algorithm`: `MetalFX Spatial` or `Native Linear`.
-- `Scale`: output scaling factor.
-- `Sharpness`: post-upscale sharpening.
-- `Dynamic Resolution`: auto-adjusts scale to maintain target FPS.
-- `Frame Generation`: inserts intermediate frames.
+- A separate output window opens and shows processed content.
+- The output window is resizable and supports macOS fullscreen.
+- The HUD displays live processing metrics.
 
-## Recommended validation tests
+## HUD metrics
 
-### Test A: Upscaling path
+- `SOURCE FPS`: source feed cadence.
+- `CAP FPS`: captured frames per second.
+- `GEN FPS`: generated frames per second.
+- `OUT FPS`: output presentation FPS.
+- `INPUT -> OUTPUT`: processed resolution mapping.
 
-1. Keep `FG OFF`.
-2. Change `Scale` from `1.0x` to `2.0x`.
-3. Verify output resolution changes in telemetry.
+## Recommended presets
 
-### Test B: 30 -> 60 validation
+- `Performance`: lowest latency, minimal processing.
+- `Balanced`: default for 30->60 workflow.
+- `Quality`: stronger upscale / heavier processing.
 
-1. Use a known 30 FPS source.
-2. Set `Capture FPS = 30`.
-3. Set `FG ON`, `Mode = 2x`, `Target FPS >= 60`.
-4. Expected: `CAP ~30`, `OUT ~60`.
+## Validation scenarios
 
-### Test C: Baseline comparison
+### A) Upscaling check
 
-1. Set `Capture FPS = 30`.
-2. Set `FG OFF`.
-3. Expected: `OUT` close to `CAP`.
+1. Disable FG.
+2. Increase `Scale`.
+3. Confirm HUD output resolution increases.
+
+### B) 30 -> 60 check
+
+1. Use a real 30 FPS source.
+2. Set `Capture FPS = 30`, `FG = On`, `Mode = 2x`, `Target FPS = 60`.
+3. Confirm `GEN FPS > 0` and `OUT` around 60.
+
+### C) Baseline check
+
+1. Disable FG.
+2. Confirm output remains smooth and close to source cadence.
 
 ## Shortcut
 
-- `Space`: toggle start/stop session.
+- `Space`: start/stop session.

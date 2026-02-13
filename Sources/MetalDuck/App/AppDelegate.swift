@@ -3,7 +3,7 @@ import CoreGraphics
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var window: NSWindow?
+    private var controlWindow: NSWindow?
     private var mainViewController: MainViewController?
     private var didBootstrap = false
 
@@ -21,8 +21,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.applicationIconImage = MetalDuckIcon.make()
 
             let metalContext = try MetalContext()
-            let captureConfiguration = CaptureConfiguration(framesPerSecond: 60)
-            let initialTarget: CaptureTarget = .automatic
+            let captureConfiguration = CaptureConfiguration(
+                framesPerSecond: 30,
+                queueDepth: 5,
+                showsCursor: false,
+                preferredPixelSize: CGSize(width: 1920, height: 1080)
+            )
+            let initialTarget: CaptureTarget = .window(nil)
+
+            let controlWindow = NSWindow(
+                contentRect: NSRect(x: 80, y: 90, width: 1360, height: 860),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+
+            controlWindow.minSize = NSSize(width: 1080, height: 760)
+            controlWindow.isReleasedWhenClosed = false
+            controlWindow.setContentSize(NSSize(width: 1360, height: 860))
+            controlWindow.title = "MetalDuck"
+
+            let overlayController = ScalingOverlayController(device: metalContext.device, controlWindow: controlWindow)
             let captureService = FrameCaptureFactory.make(
                 context: metalContext,
                 target: initialTarget,
@@ -34,33 +53,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 captureService: captureService,
                 settingsStore: SettingsStore(),
                 captureConfiguration: captureConfiguration,
-                initialTarget: initialTarget
+                initialTarget: initialTarget,
+                outputView: overlayController.mtkView,
+                overlayController: overlayController
             )
 
-            let window = NSWindow(
-                contentRect: NSRect(x: 120, y: 120, width: 1560, height: 920),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
+            controlWindow.contentViewController = viewController
 
-            window.minSize = NSSize(width: 1200, height: 760)
-            window.isReleasedWhenClosed = false
-            window.contentViewController = viewController
-            window.setContentSize(NSSize(width: 1560, height: 920))
-            window.center()
-            window.orderFrontRegardless()
-            window.makeMain()
-            window.makeKeyAndOrderFront(nil)
+            controlWindow.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)
 
-            self.window = window
+            self.controlWindow = controlWindow
             self.mainViewController = viewController
 
             Task { await viewController.start() }
             requestScreenCapturePermissionIfNeededAsync()
         } catch {
-            fatalError("Failed to initialize MetalDuck: \(error)")
+            presentFatalInitializationError(error)
         }
     }
 
@@ -81,6 +90,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    private func presentFatalInitializationError(_ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = "MetalDuck failed to initialize"
+        alert.informativeText = error.localizedDescription
+        alert.addButton(withTitle: "Quit")
+        alert.runModal()
+        NSApplication.shared.terminate(nil)
     }
 
     private func requestScreenCapturePermissionIfNeededAsync() {

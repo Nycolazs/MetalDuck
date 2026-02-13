@@ -10,10 +10,10 @@ final class MainViewController: NSViewController {
         let target: CaptureTarget
     }
 
-    private let mtkView: MTKView
     private let controlPanel = ControlPanelView(frame: .zero)
     private let renderer: RendererCoordinator
     private let settingsStore: SettingsStore
+    private let overlayController: ScalingOverlayController
 
     private var captureConfiguration: CaptureConfiguration
 
@@ -30,17 +30,16 @@ final class MainViewController: NSViewController {
         captureService: FrameCaptureService,
         settingsStore: SettingsStore,
         captureConfiguration: CaptureConfiguration,
-        initialTarget: CaptureTarget
+        initialTarget: CaptureTarget,
+        outputView: MTKView,
+        overlayController: ScalingOverlayController
     ) throws {
         self.settingsStore = settingsStore
         self.captureConfiguration = captureConfiguration
-
-        let mtkView = MTKView(frame: .zero, device: context.device)
-        mtkView.translatesAutoresizingMaskIntoConstraints = false
-        self.mtkView = mtkView
+        self.overlayController = overlayController
 
         self.renderer = try RendererCoordinator(
-            view: mtkView,
+            view: outputView,
             context: context,
             captureService: captureService,
             captureConfiguration: captureConfiguration,
@@ -69,47 +68,15 @@ final class MainViewController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = NSView(frame: NSRect(x: 0, y: 0, width: 1560, height: 920))
-
-        let splitView = NSSplitView()
-        splitView.translatesAutoresizingMaskIntoConstraints = false
-        splitView.isVertical = true
-        splitView.dividerStyle = .thin
-
-        let panelContainer = NSView()
-        panelContainer.translatesAutoresizingMaskIntoConstraints = false
-        panelContainer.addSubview(controlPanel)
+        let rootView = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 920))
+        rootView.addSubview(controlPanel)
         controlPanel.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
-            controlPanel.leadingAnchor.constraint(equalTo: panelContainer.leadingAnchor),
-            controlPanel.trailingAnchor.constraint(equalTo: panelContainer.trailingAnchor),
-            controlPanel.topAnchor.constraint(equalTo: panelContainer.topAnchor),
-            controlPanel.bottomAnchor.constraint(equalTo: panelContainer.bottomAnchor),
-            panelContainer.widthAnchor.constraint(equalToConstant: 370)
-        ])
-
-        let renderContainer = NSView()
-        renderContainer.translatesAutoresizingMaskIntoConstraints = false
-        renderContainer.addSubview(mtkView)
-
-        NSLayoutConstraint.activate([
-            mtkView.leadingAnchor.constraint(equalTo: renderContainer.leadingAnchor),
-            mtkView.trailingAnchor.constraint(equalTo: renderContainer.trailingAnchor),
-            mtkView.topAnchor.constraint(equalTo: renderContainer.topAnchor),
-            mtkView.bottomAnchor.constraint(equalTo: renderContainer.bottomAnchor)
-        ])
-
-        splitView.addArrangedSubview(panelContainer)
-        splitView.addArrangedSubview(renderContainer)
-
-        rootView.addSubview(splitView)
-
-        NSLayoutConstraint.activate([
-            splitView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
-            splitView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: rootView.topAnchor),
-            splitView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor)
+            controlPanel.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            controlPanel.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            controlPanel.topAnchor.constraint(equalTo: rootView.topAnchor),
+            controlPanel.bottomAnchor.constraint(equalTo: rootView.bottomAnchor)
         ])
 
         self.view = rootView
@@ -124,9 +91,11 @@ final class MainViewController: NSViewController {
     func start() async {
         await refreshCaptureSources()
         controlPanel.setCaptureMode(selectedCaptureMode)
+        applyCaptureTargetSelection()
         controlPanel.apply(settings: settingsStore.snapshot(), capture: captureConfiguration)
         controlPanel.setRunning(false)
         controlPanel.setStatus("Ready")
+        overlayController.hide()
         updateWindowTitle()
     }
 
@@ -135,6 +104,7 @@ final class MainViewController: NSViewController {
         DispatchQueue.main.async { [weak self] in
             self?.controlPanel.setRunning(false)
             self?.controlPanel.setStatus("Stopped")
+            self?.overlayController.hide()
             self?.updateWindowTitle()
         }
     }
@@ -152,14 +122,17 @@ final class MainViewController: NSViewController {
         let inputLabel = "\(Int(stats.inputSize.width))x\(Int(stats.inputSize.height))"
         let outputLabel = "\(Int(stats.outputSize.width))x\(Int(stats.outputSize.height))"
         let label = String(
-            format: "CAP %.1f FPS  |  OUT %.1f FPS\n%@ -> %@  |  Scale %.2fx",
-            stats.captureFPS,
+            format: "SOURCE %.1f FPS  |  OUT %.1f FPS\nGEN %.1f FPS  |  CAP %.1f FPS\n%@ -> %@  |  Scale %.2fx",
+            stats.sourceFPS,
             stats.presentFPS,
+            stats.generatedFPS,
+            stats.captureFPS,
             inputLabel,
             outputLabel,
             stats.effectiveScale
         )
         controlPanel.setStats(label)
+        overlayController.updateStats(stats)
         if stats.isRunning {
             controlPanel.setStatus("Running")
         }
@@ -172,10 +145,12 @@ final class MainViewController: NSViewController {
 
         let settings = settingsStore.snapshot()
         let scaleString = String(format: "%.2fx", settings.outputScale)
+        let nativeMatch = settings.matchOutputResolution ? "MatchOut On" : "MatchOut Off"
         let dynamic = settings.dynamicResolutionEnabled ? "DRS On" : "DRS Off"
         let fg = settings.frameGenerationEnabled ? "FG \(settings.frameGenerationMode.rawValue)" : "FG Off"
 
-        window.title = "MetalDuck | \(settings.upscalingAlgorithm.rawValue) | \(scaleString) | \(dynamic) | \(fg)"
+        let title = "MetalDuck | \(settings.upscalingAlgorithm.rawValue) | \(scaleString) | \(nativeMatch) | \(dynamic) | \(fg)"
+        window.title = title
     }
 
     private func refreshCaptureSources() async {
@@ -191,7 +166,20 @@ final class MainViewController: NSViewController {
             CaptureEntry(title: source.title, target: .window(source.windowID))
         }
 
+        if selectedCaptureMode == .window,
+           !windowEntries.isEmpty {
+            let browserHints = ["Firefox", "Google Chrome", "Safari", "Brave", "Arc"]
+            if let browserIndex = windowEntries.firstIndex(where: { entry in
+                browserHints.contains(where: { entry.title.localizedCaseInsensitiveContains($0) })
+            }) {
+                selectedWindowIndex = browserIndex
+            } else {
+                selectedWindowIndex = min(selectedWindowIndex, windowEntries.count - 1)
+            }
+        }
+
         applyCaptureModeToPicker()
+        applyCaptureTargetSelection()
         controlPanel.setStatus("Sources updated")
     }
 
@@ -233,11 +221,17 @@ final class MainViewController: NSViewController {
         let target = selectedCaptureTarget()
 
         Task { [weak self] in
+            guard let self else { return }
             do {
-                try await self?.renderer.reconfigureCapture(target: target)
+                try await self.renderer.reconfigureCapture(target: target)
+                await MainActor.run {
+                    if self.renderer.isRunning {
+                        self.overlayController.show(on: self.outputDisplayID(for: target))
+                    }
+                }
             } catch {
                 await MainActor.run {
-                    self?.controlPanel.setStatus("Capture target failed", isError: true)
+                    self.controlPanel.setStatus("Capture target failed", isError: true)
                 }
             }
         }
@@ -275,6 +269,89 @@ final class MainViewController: NSViewController {
         return granted
     }
 
+    private func outputDisplayID(for target: CaptureTarget) -> CGDirectDisplayID? {
+        switch target {
+        case .display(let displayID):
+            return displayID ?? displayIDForScreen(view.window?.screen)
+        case .window(let windowID):
+            return displayIDForWindow(windowID) ?? displayIDForScreen(view.window?.screen)
+        case .automatic:
+            return displayIDForFrontmostExternalWindow() ?? displayIDForScreen(view.window?.screen)
+        }
+    }
+
+    private func displayIDForWindow(_ windowID: CGWindowID?) -> CGDirectDisplayID? {
+        guard let windowID else {
+            return nil
+        }
+
+        guard let rawInfo = CGWindowListCopyWindowInfo([.optionIncludingWindow], windowID) as? [[String: Any]],
+              let info = rawInfo.first,
+              let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary else {
+            return nil
+        }
+
+        var bounds = CGRect.zero
+        guard CGRectMakeWithDictionaryRepresentation(boundsDictionary, &bounds) else {
+            return nil
+        }
+
+        return displayIDForBounds(bounds)
+    }
+
+    private func displayIDForFrontmostExternalWindow() -> CGDirectDisplayID? {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        for entry in entries {
+            guard let ownerPID = entry[kCGWindowOwnerPID as String] as? NSNumber,
+                  pid_t(ownerPID.intValue) != currentPID,
+                  let layer = entry[kCGWindowLayer as String] as? NSNumber,
+                  layer.intValue == 0,
+                  let boundsDictionary = entry[kCGWindowBounds as String] as? NSDictionary else {
+                continue
+            }
+
+            var bounds = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(boundsDictionary, &bounds) else {
+                continue
+            }
+
+            if let displayID = displayIDForBounds(bounds) {
+                return displayID
+            }
+        }
+
+        return nil
+    }
+
+    private func displayIDForBounds(_ bounds: CGRect) -> CGDirectDisplayID? {
+        var bestDisplayID: CGDirectDisplayID?
+        var bestArea: CGFloat = 0
+
+        for screen in NSScreen.screens {
+            let intersection = screen.frame.intersection(bounds)
+            let area = intersection.width * intersection.height
+            if area > bestArea {
+                bestArea = area
+                bestDisplayID = displayIDForScreen(screen)
+            }
+        }
+
+        return bestDisplayID
+    }
+
+    private func displayIDForScreen(_ screen: NSScreen?) -> CGDirectDisplayID? {
+        guard let screen,
+              let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            return nil
+        }
+
+        return CGDirectDisplayID(screenNumber.uint32Value)
+    }
+
     private func scheduleCaptureHealthCheck() {
         let startedAt = CACurrentMediaTime()
         lastStatsUpdateTime = nil
@@ -291,50 +368,80 @@ final class MainViewController: NSViewController {
                         "No frames received. Check Screen Recording permission and selected source.",
                         isError: true
                     )
+                    self.overlayController.setWaitingForFrames(message: "Waiting for frames...")
                 }
             }
         }
     }
 
     private func applyPreset(_ preset: ControlPreset) {
+        var presetCaptureFPS: Int = captureConfiguration.framesPerSecond
+        var presetQueueDepth: Int = captureConfiguration.queueDepth
         let settings = settingsStore.update { value in
             switch preset {
             case .performance:
+                presetCaptureFPS = 30
+                presetQueueDepth = 4
                 value.upscalingAlgorithm = .nativeLinear
                 value.outputScale = 1.0
-                value.sharpness = 0.05
+                value.matchOutputResolution = true
+                value.samplingMode = .nearest
+                value.sharpness = 0.0
                 value.dynamicResolutionEnabled = true
                 value.dynamicScaleMinimum = 0.70
                 value.dynamicScaleMaximum = 1.00
-                value.targetPresentationFPS = 120
+                value.targetPresentationFPS = 60
                 value.frameGenerationEnabled = false
                 value.frameGenerationMode = .x2
 
             case .balanced:
+                presetCaptureFPS = 30
+                presetQueueDepth = 5
                 value.upscalingAlgorithm = .metalFXSpatial
-                value.outputScale = 1.5
-                value.sharpness = 0.15
-                value.dynamicResolutionEnabled = true
-                value.dynamicScaleMinimum = 0.75
-                value.dynamicScaleMaximum = 1.00
-                value.targetPresentationFPS = 120
-                value.frameGenerationEnabled = false
-                value.frameGenerationMode = .x2
-
-            case .quality:
-                value.upscalingAlgorithm = .metalFXSpatial
-                value.outputScale = 2.0
-                value.sharpness = 0.20
+                value.outputScale = 1.15
+                value.matchOutputResolution = true
+                value.samplingMode = .linear
+                value.sharpness = 0.12
                 value.dynamicResolutionEnabled = false
                 value.dynamicScaleMinimum = 1.0
                 value.dynamicScaleMaximum = 1.0
                 value.targetPresentationFPS = 60
-                value.frameGenerationEnabled = false
+                value.frameGenerationEnabled = true
+                value.frameGenerationMode = .x2
+
+            case .quality:
+                presetCaptureFPS = 30
+                presetQueueDepth = 6
+                value.upscalingAlgorithm = .metalFXSpatial
+                value.outputScale = 1.35
+                value.matchOutputResolution = false
+                value.samplingMode = .linear
+                value.sharpness = 0.22
+                value.dynamicResolutionEnabled = false
+                value.dynamicScaleMinimum = 1.0
+                value.dynamicScaleMaximum = 1.0
+                value.targetPresentationFPS = 60
+                value.frameGenerationEnabled = true
                 value.frameGenerationMode = .x2
             }
         }
 
+        if captureConfiguration.framesPerSecond != presetCaptureFPS || captureConfiguration.queueDepth != presetQueueDepth {
+            updateCaptureConfiguration { config in
+                config.framesPerSecond = presetCaptureFPS
+                config.queueDepth = presetQueueDepth
+            }
+        }
+
         controlPanel.apply(settings: settings, capture: captureConfiguration)
+        switch preset {
+        case .performance:
+            controlPanel.setStatus("Preset applied: Performance (max FPS / low latency)")
+        case .balanced:
+            controlPanel.setStatus("Preset applied: Balanced (30 -> 60 + moderate upscale)")
+        case .quality:
+            controlPanel.setStatus("Preset applied: Quality (strong upscale + FG)")
+        }
         updateWindowTitle()
     }
 
@@ -356,22 +463,37 @@ final class MainViewController: NSViewController {
                     await MainActor.run {
                         self?.controlPanel.setRunning(false)
                         self?.controlPanel.setStatus("Stopped")
+                        self?.overlayController.hide()
                         self?.updateWindowTitle()
                     }
                 }
             } else {
                 Task { [weak self] in
+                    guard let self else { return }
+                    let target = self.selectedCaptureTarget()
+                    let outputDisplayID = self.outputDisplayID(for: target)
                     do {
-                        try await self?.renderer.start()
                         await MainActor.run {
-                            self?.controlPanel.setRunning(true)
-                            self?.controlPanel.setStatus("Running")
-                            self?.updateWindowTitle()
+                            self.overlayController.show(on: outputDisplayID)
+                            self.overlayController.setWaitingForFrames(message: "Starting capture...")
+                        }
+
+                        try await self.renderer.reconfigureCapture(target: target)
+                        try await self.renderer.start()
+                        await MainActor.run {
+                            self.controlPanel.setRunning(true)
+                            self.controlPanel.setStatus("Running (waiting for frames...)")
+                            self.overlayController.setWaitingForFrames(message: "Processing active")
+                            self.updateWindowTitle()
+                            self.scheduleCaptureHealthCheck()
                         }
                     } catch {
+                        NSLog("Renderer start failed: \(error.localizedDescription)")
                         await MainActor.run {
-                            self?.controlPanel.setRunning(false)
-                            self?.controlPanel.setStatus("Start failed", isError: true)
+                            self.controlPanel.setRunning(false)
+                            self.controlPanel.setStatus("Start failed", isError: true)
+                            self.overlayController.setCaptureError("Start failed")
+                            self.overlayController.hide()
                         }
                     }
                 }
@@ -386,24 +508,34 @@ extension MainViewController: ControlPanelViewDelegate {
     func controlPanelDidPressStart(_ panel: ControlPanelView) {
         guard ensureScreenCapturePermission() else {
             panel.setStatus("Screen Recording permission denied.", isError: true)
+            overlayController.setCaptureError("Screen Recording permission denied")
             return
         }
 
         panel.setStatus("Starting...")
+        let target = selectedCaptureTarget()
+        overlayController.show(on: outputDisplayID(for: target))
+        overlayController.setWaitingForFrames(message: "Starting capture...")
 
         Task { [weak self] in
+            guard let self else { return }
             do {
-                try await self?.renderer.start()
+                try await self.renderer.reconfigureCapture(target: target)
+                try await self.renderer.start()
                 await MainActor.run {
                     panel.setRunning(true)
                     panel.setStatus("Running (waiting for frames...)")
-                    self?.scheduleCaptureHealthCheck()
-                    self?.updateWindowTitle()
+                    self.overlayController.setWaitingForFrames(message: "Processing active")
+                    self.scheduleCaptureHealthCheck()
+                    self.updateWindowTitle()
                 }
             } catch {
+                NSLog("Renderer start failed: \(error.localizedDescription)")
                 await MainActor.run {
                     panel.setRunning(false)
                     panel.setStatus("Start failed", isError: true)
+                    self.overlayController.setCaptureError("Start failed: \(error.localizedDescription)")
+                    self.overlayController.hide()
                 }
             }
         }
@@ -417,6 +549,7 @@ extension MainViewController: ControlPanelViewDelegate {
             await MainActor.run {
                 panel.setRunning(false)
                 panel.setStatus("Stopped")
+                self?.overlayController.hide()
                 self?.updateWindowTitle()
             }
         }
@@ -456,6 +589,14 @@ extension MainViewController: ControlPanelViewDelegate {
         updateCaptureConfiguration { config in
             config.framesPerSecond = fps
         }
+        updateRenderSettings(syncUI: true) { settings in
+            guard settings.frameGenerationEnabled else { return }
+            let multiplier = settings.frameGenerationMode == .x2 ? 2 : 3
+            let minimumTarget = max(60, fps * multiplier)
+            if settings.targetPresentationFPS < minimumTarget {
+                settings.targetPresentationFPS = minimumTarget
+            }
+        }
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeQueueDepth depth: Int) {
@@ -468,30 +609,42 @@ extension MainViewController: ControlPanelViewDelegate {
         updateRenderSettings { settings in
             settings.upscalingAlgorithm = algorithm
         }
+        panel.setStatus("Upscaling: \(algorithm.rawValue)")
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeOutputScale scale: Float) {
         updateRenderSettings { settings in
             settings.outputScale = scale
         }
+        panel.setStatus(String(format: "Scale factor: %.2fx", scale))
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didToggleMatchOutputResolution enabled: Bool) {
+        updateRenderSettings { settings in
+            settings.matchOutputResolution = enabled
+        }
+        panel.setStatus(enabled ? "Match output resolution: On" : "Match output resolution: Off")
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeSamplingMode mode: SamplingMode) {
         updateRenderSettings { settings in
             settings.samplingMode = mode
         }
+        panel.setStatus("Sampling: \(mode.rawValue)")
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeSharpness value: Float) {
         updateRenderSettings { settings in
             settings.sharpness = value
         }
+        panel.setStatus(String(format: "Sharpness: %.2f", value))
     }
 
     func controlPanel(_ panel: ControlPanelView, didToggleDynamicResolution enabled: Bool) {
         updateRenderSettings { settings in
             settings.dynamicResolutionEnabled = enabled
         }
+        panel.setStatus(enabled ? "Dynamic Resolution: On" : "Dynamic Resolution: Off")
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeDynamicMinimum value: Float) {
@@ -516,18 +669,33 @@ extension MainViewController: ControlPanelViewDelegate {
         updateRenderSettings { settings in
             settings.targetPresentationFPS = fps
         }
+        panel.setStatus("Target FPS: \(fps)")
     }
 
     func controlPanel(_ panel: ControlPanelView, didToggleFrameGeneration enabled: Bool) {
-        updateRenderSettings { settings in
+        updateRenderSettings(syncUI: true) { settings in
             settings.frameGenerationEnabled = enabled
+            guard enabled else { return }
+            let multiplier = settings.frameGenerationMode == .x2 ? 2 : 3
+            let minimumTarget = max(60, captureConfiguration.framesPerSecond * multiplier)
+            if settings.targetPresentationFPS < minimumTarget {
+                settings.targetPresentationFPS = minimumTarget
+            }
         }
+        panel.setStatus(enabled ? "Frame Generation: On" : "Frame Generation: Off")
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationMode mode: FrameGenerationMode) {
-        updateRenderSettings { settings in
+        updateRenderSettings(syncUI: true) { settings in
             settings.frameGenerationMode = mode
+            guard settings.frameGenerationEnabled else { return }
+            let multiplier = mode == .x2 ? 2 : 3
+            let minimumTarget = max(60, captureConfiguration.framesPerSecond * multiplier)
+            if settings.targetPresentationFPS < minimumTarget {
+                settings.targetPresentationFPS = minimumTarget
+            }
         }
+        panel.setStatus("FG Mode: \(mode.rawValue)")
     }
 
     func controlPanel(_ panel: ControlPanelView, didSelectPreset preset: ControlPreset) {

@@ -1,19 +1,19 @@
 # Roadmap
 
-## Short term
+## Next milestones
 
-- Improve overlay behavior and presentation ergonomics.
-- Add stronger visual A/B comparison mode (before/after split).
-- Improve source picker UX with previews.
+- Add side-by-side A/B preview mode.
+- Add explicit color profile selector (`Auto / sRGB / Display P3`).
+- Add persistent per-app profiles and profile export/import.
 
-## Mid term
+## Performance and quality
 
-- Borderless overlay window mode with click-through options.
-- Per-app presets and hotkey profiles.
-- Better pacing diagnostics and frame-time graphs.
+- Multi-level optical-flow estimation for stronger FG stability.
+- Better occlusion handling in interpolation pass.
+- Optional async FG quality levels (Fast / Balanced / Quality).
 
-## Long term
+## Longer-term targets
 
-- True high-quality FG integration with motion/depth inputs.
-- Game integration hooks where legally/technically possible.
-- Packaging as full macOS app bundle for distribution.
+- Optional engine-level integrations for true motion/depth inputs.
+- App bundle packaging + notarization pipeline.
+- Automated benchmark suite for FPS and quality regressions.

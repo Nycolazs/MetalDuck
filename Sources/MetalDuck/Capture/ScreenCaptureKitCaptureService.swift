@@ -4,6 +4,7 @@ import CoreVideo
 import Foundation
 import Metal
 import ScreenCaptureKit
+import simd
 
 @available(macOS 12.3, *)
 enum ScreenCaptureServiceError: Error {
@@ -23,6 +24,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
     private let sampleQueue = DispatchQueue(label: "metaldck.capture.sckit.sample")
     private var stream: SCStream?
+    private let motionEstimator = GlobalMotionEstimator()
 
     init(context: MetalContext, target: CaptureTarget, configuration: CaptureConfiguration) {
         self.context = context
@@ -34,10 +36,11 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         if stream != nil {
             await stop()
         }
+        motionEstimator.reset()
 
         let shareableContent = try await SCShareableContent.current
         let selection = try resolveSelection(in: shareableContent)
-        let filter = makeFilter(for: selection)
+        let filter = makeFilter(for: selection, shareableContent: shareableContent)
         let captureSize = resolveCaptureSize(for: selection, filter: filter)
 
         let streamConfiguration = SCStreamConfiguration()
@@ -51,6 +54,9 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             value: 1,
             timescale: CMTimeScale(max(captureConfiguration.framesPerSecond, 1))
         )
+        if #available(macOS 15.0, *) {
+            streamConfiguration.captureDynamicRange = .SDR
+        }
 
         if #available(macOS 13.0, *) {
             streamConfiguration.capturesAudio = false
@@ -93,6 +99,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
 
         self.stream = nil
+        motionEstimator.reset()
     }
 
     func reconfigure(target: CaptureTarget) async throws {
@@ -119,6 +126,8 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
     }
 
     private func resolveSelection(in shareableContent: SCShareableContent) throws -> Selection {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+
         switch target {
         case .display(let requestedDisplayID):
             if let requestedDisplayID,
@@ -131,20 +140,23 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             return .display(display)
 
         case .window(let requestedWindowID):
-            let candidates = shareableContent.windows.filter { $0.isOnScreen }
+            let candidates = shareableContent.windows.filter {
+                $0.isOnScreen &&
+                    $0.windowLayer == 0 &&
+                    $0.owningApplication?.processID != currentPID
+            }
             if let requestedWindowID,
                let window = candidates.first(where: { $0.windowID == requestedWindowID }) {
                 return .window(window)
             }
-            guard let window = candidates.first(where: { $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier })
-                ?? candidates.first else {
+            guard let window = candidates.first else {
                 throw ScreenCaptureServiceError.noShareableWindow
             }
             return .window(window)
 
         case .automatic:
             let windows = shareableContent.windows.filter { $0.isOnScreen && $0.windowLayer == 0 }
-            if let window = windows.first(where: { $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier }) {
+            if let window = windows.first(where: { $0.owningApplication?.processID != currentPID }) {
                 return .window(window)
             }
             guard let display = shareableContent.displays.first else {
@@ -154,10 +166,12 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
     }
 
-    private func makeFilter(for selection: Selection) -> SCContentFilter {
+    private func makeFilter(for selection: Selection, shareableContent: SCShareableContent) -> SCContentFilter {
         switch selection {
         case .display(let display):
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            let currentPID = ProcessInfo.processInfo.processIdentifier
+            let ownWindows = shareableContent.windows.filter { $0.owningApplication?.processID == currentPID }
+            let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
             if #available(macOS 14.2, *) {
                 filter.includeMenuBar = false
             }
@@ -170,10 +184,11 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
     private func resolveCaptureSize(for selection: Selection, filter: SCContentFilter) -> (width: Int, height: Int) {
         if let preferredPixelSize = captureConfiguration.preferredPixelSize {
-            return (
-                width: max(1, Int(preferredPixelSize.width)),
-                height: max(1, Int(preferredPixelSize.height))
-            )
+            let preferredArea = max(1.0, preferredPixelSize.width * preferredPixelSize.height)
+            let aspect = max(0.1, captureAspect(for: selection))
+            let width = max(1, Int((preferredArea * aspect).squareRoot().rounded()))
+            let height = max(1, Int((Double(width) / Double(aspect)).rounded()))
+            return (width: width, height: height)
         }
 
         if #available(macOS 14.0, *) {
@@ -191,19 +206,21 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
     }
 
+    private func captureAspect(for selection: Selection) -> CGFloat {
+        switch selection {
+        case .display(let display):
+            return CGFloat(max(1, display.width)) / CGFloat(max(1, display.height))
+        case .window(let window):
+            let width = max(1.0, window.frame.width)
+            let height = max(1.0, window.frame.height)
+            return width / height
+        }
+    }
+
     private func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
         guard CMSampleBufferIsValid(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
             return
-        }
-
-        if let status = frameStatus(from: sampleBuffer) {
-            switch status {
-            case .complete, .started:
-                break
-            default:
-                return
-            }
         }
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
@@ -232,20 +249,140 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             texture: metalTexture,
             timestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
             contentRect: CGRect(x: 0, y: 0, width: width, height: height),
+            motionHint: motionEstimator.estimate(for: pixelBuffer),
             backingTexture: wrappedTexture
         )
 
         onFrame?(frame)
     }
 
-    private func frameStatus(from sampleBuffer: CMSampleBuffer) -> SCFrameStatus? {
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[AnyHashable: Any]],
-              let firstAttachment = attachments.first,
-              let statusValue = firstAttachment[SCStreamFrameInfo.status] as? NSNumber else {
+}
+
+private final class GlobalMotionEstimator {
+    private static let sampleWidth = 32
+    private static let sampleHeight = 18
+    private static let maxShift = 2
+
+    private var previousGrid: [UInt8]?
+    private var smoothedMotion: SIMD2<Float> = .zero
+    private var frameCounter: UInt64 = 0
+
+    func reset() {
+        previousGrid = nil
+        smoothedMotion = .zero
+        frameCounter = 0
+    }
+
+    func estimate(for pixelBuffer: CVPixelBuffer) -> SIMD2<Float> {
+        frameCounter &+= 1
+
+        let width = max(1, CVPixelBufferGetWidth(pixelBuffer))
+        let height = max(1, CVPixelBufferGetHeight(pixelBuffer))
+
+        guard let currentGrid = makeLumaGrid(from: pixelBuffer) else {
+            return .zero
+        }
+
+        defer {
+            previousGrid = currentGrid
+        }
+
+        guard let previousGrid else {
+            return .zero
+        }
+
+        // Re-estimate every third frame to keep capture callback lightweight.
+        if frameCounter % 3 != 0 {
+            return smoothedMotion
+        }
+
+        let bestShift = bestShiftBetween(previous: previousGrid, current: currentGrid)
+        let scaleX = Float(width) / Float(Self.sampleWidth)
+        let scaleY = Float(height) / Float(Self.sampleHeight)
+
+        let rawMotion = SIMD2<Float>(Float(bestShift.dx) * scaleX, Float(bestShift.dy) * scaleY)
+        smoothedMotion = (smoothedMotion * 0.7) + (rawMotion * 0.3)
+        return smoothedMotion
+    }
+
+    private func makeLumaGrid(from pixelBuffer: CVPixelBuffer) -> [UInt8]? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
             return nil
         }
 
-        return SCFrameStatus(rawValue: statusValue.intValue)
+        let width = max(1, CVPixelBufferGetWidth(pixelBuffer))
+        let height = max(1, CVPixelBufferGetHeight(pixelBuffer))
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+        let sampleWidth = Self.sampleWidth
+        let sampleHeight = Self.sampleHeight
+        var grid = [UInt8](repeating: 0, count: sampleWidth * sampleHeight)
+
+        for sy in 0..<sampleHeight {
+            let y = min(height - 1, (sy * height) / sampleHeight)
+            let rowPtr = baseAddress.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt8.self)
+
+            for sx in 0..<sampleWidth {
+                let x = min(width - 1, (sx * width) / sampleWidth)
+                let pixel = rowPtr.advanced(by: x * 4)
+
+                // BGRA to luma approximation.
+                let b = Int(pixel[0])
+                let g = Int(pixel[1])
+                let r = Int(pixel[2])
+                let luma = (29 * b + 150 * g + 77 * r) >> 8
+                grid[(sy * sampleWidth) + sx] = UInt8(clamping: luma)
+            }
+        }
+
+        return grid
+    }
+
+    private func bestShiftBetween(previous: [UInt8], current: [UInt8]) -> (dx: Int, dy: Int) {
+        let sampleWidth = Self.sampleWidth
+        let sampleHeight = Self.sampleHeight
+        let maxShift = Self.maxShift
+
+        var bestDX = 0
+        var bestDY = 0
+        var bestError: UInt64 = .max
+
+        for dy in (-maxShift)...maxShift {
+            for dx in (-maxShift)...maxShift {
+                let xStart = max(0, -dx)
+                let xEnd = min(sampleWidth, sampleWidth - dx)
+                let yStart = max(0, -dy)
+                let yEnd = min(sampleHeight, sampleHeight - dy)
+
+                guard xStart < xEnd, yStart < yEnd else {
+                    continue
+                }
+
+                var error: UInt64 = 0
+
+                for y in yStart..<yEnd {
+                    let prevBase = y * sampleWidth
+                    let currBase = (y + dy) * sampleWidth
+
+                    for x in xStart..<xEnd {
+                        let prevValue = Int(previous[prevBase + x])
+                        let currValue = Int(current[currBase + x + dx])
+                        error &+= UInt64(abs(prevValue - currValue))
+                    }
+                }
+
+                if error < bestError {
+                    bestError = error
+                    bestDX = dx
+                    bestDY = dy
+                }
+            }
+        }
+
+        return (bestDX, bestDY)
     }
 }
 

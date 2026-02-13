@@ -1,41 +1,45 @@
 # Troubleshooting
 
-## App opens but no frames are shown
-
-Symptoms:
-- Status may show running but output stays static/empty.
+## "No frames received"
 
 Checks:
-1. macOS **Screen Recording permission** is granted.
-2. Selected source (window/display) is still valid and visible.
-3. Click `Refresh` and reselect the source.
+1. Confirm macOS Screen Recording permission is granted for MetalDuck.
+2. Click `Refresh` and reselect capture source.
+3. If `Window` mode fails for a specific app, try `Display` mode.
+4. Keep source window visible (some apps throttle hidden windows).
 
-## CAP/OUT numbers do not change
+## Output FPS lower than source FPS
 
 Checks:
-1. Make sure capture actually started (`Start Scaling`).
-2. Use a moving source (video/game) to verify refresh.
-3. Toggle `FG OFF` then `FG ON` and compare `OUT`.
+1. Reduce output size (or disable fullscreen) and compare again.
+2. Try `FG Off` to validate baseline rendering throughput.
+3. If using `FG 3x`, test `FG 2x` first.
+4. Lower scale factor or disable Dynamic Resolution constraints.
 
 ## 30 -> 60 does not happen
 
+Use this exact baseline:
+1. Source is truly 30 FPS.
+2. `Capture FPS = 30`.
+3. `Frame Generation = On`, `Mode = 2x`.
+4. `Target FPS = 60`.
+5. Confirm output HUD shows `GEN FPS > 0` and `OUT` near 60.
+
+## Colors look washed out
+
 Checks:
-1. Source must be truly ~30 FPS.
-2. Set `Capture FPS = 30`.
-3. Set `FG ON`, `Mode = 2x`.
-4. Set `Target FPS >= 60`.
-5. Confirm `CAP ~30` and `OUT ~60` in stats.
+1. Ensure source and output are on the same display while testing.
+2. Keep capture dynamic range in SDR (default in this project).
+3. Verify your display profile is not switching between SDR/HDR modes.
 
-## Black screen for some apps/videos
+## Capture works but quality looks unchanged
 
-Likely DRM/protected content limitation on macOS capture APIs.
+Checks:
+1. Increase output window size or go fullscreen on output window.
+2. Verify `INPUT -> OUTPUT` in HUD shows larger output dimensions.
+3. Compare `Native Linear` vs `MetalFX Spatial` in the same scene.
 
-## Build issues with SDK/toolchain mismatch
+## DRM / protected content shows black
 
-Use explicit SDKROOT:
-
-```bash
-SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk swift build
-```
-
-If mismatch persists, align Xcode/CLT versions.
+Some protected surfaces cannot be captured through ScreenCaptureKit.
+Use non-protected content to validate the pipeline.

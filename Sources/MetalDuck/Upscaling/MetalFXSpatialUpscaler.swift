@@ -82,6 +82,7 @@ final class MetalFXSpatialUpscaler {
         descriptor.outputHeight = outputHeight
         descriptor.colorTextureFormat = inputFormat
         descriptor.outputTextureFormat = outputFormat
+        // Screen capture content is already perceptual encoded (sRGB-like).
         descriptor.colorProcessingMode = .perceptual
 
         guard let scaler = descriptor.makeSpatialScaler(device: device) else {

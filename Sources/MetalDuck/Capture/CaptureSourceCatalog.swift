@@ -37,6 +37,7 @@ enum CaptureSourceCatalogProvider {
     @available(macOS 12.3, *)
     private static func loadFromScreenCaptureKit() async throws -> CaptureSourceCatalog {
         let content = try await SCShareableContent.current
+        let currentPID = ProcessInfo.processInfo.processIdentifier
 
         let displays: [CaptureDisplaySource] = content.displays
             .sorted { $0.displayID < $1.displayID }
@@ -47,7 +48,11 @@ enum CaptureSourceCatalogProvider {
             }
 
         let windows: [CaptureWindowSource] = content.windows
-            .filter { $0.isOnScreen && $0.windowLayer == 0 }
+            .filter { window in
+                window.isOnScreen &&
+                    window.windowLayer == 0 &&
+                    window.owningApplication?.processID != currentPID
+            }
             .sorted { lhs, rhs in
                 let lhsArea = lhs.frame.width * lhs.frame.height
                 let rhsArea = rhs.frame.width * rhs.frame.height
@@ -66,6 +71,7 @@ enum CaptureSourceCatalogProvider {
     }
 
     private static func loadFromCoreGraphics() -> CaptureSourceCatalog {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
         let displaySources = activeDisplayIDs()
             .enumerated()
             .map { index, displayID in
@@ -81,6 +87,8 @@ enum CaptureSourceCatalogProvider {
             .compactMap { info in
                 guard let layer = info[kCGWindowLayer as String] as? NSNumber,
                       layer.intValue == 0,
+                      let ownerPIDValue = info[kCGWindowOwnerPID as String] as? NSNumber,
+                      pid_t(ownerPIDValue.intValue) != currentPID,
                       let rawID = info[kCGWindowNumber as String] as? NSNumber else {
                     return nil
                 }

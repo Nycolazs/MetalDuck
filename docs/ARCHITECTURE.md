@@ -1,48 +1,53 @@
 # Architecture
 
-## Overview
+## Pipeline overview
 
-Main pipeline:
-1. `ScreenCaptureKitCaptureService` receives `CMSampleBuffer` frames.
-2. `CVPixelBuffer` is wrapped into `MTLTexture` (`CVMetalTextureCache`).
-3. `RendererCoordinator` processes each frame:
-   - dynamic resolution scaling,
-   - upscaling (MetalFX Spatial or native),
-   - frame generation resolve (MetalFX path or blend fallback),
-   - final presentation to `MTKView`.
-4. `ControlPanelView` updates runtime settings via `SettingsStore`.
+1. `ScreenCaptureKitCaptureService` captures `CMSampleBuffer` frames.
+2. Frame image buffers are wrapped as `MTLTexture` using `CVMetalTextureCache`.
+3. `RendererCoordinator` performs:
+   - scale calculation (manual + optional dynamic resolution),
+   - upscaling (`MetalFX Spatial` or native resample),
+   - optional frame generation,
+   - final presentation to output `MTKView`.
+4. `OutputViewController` shows real-time telemetry in the output window.
 
-## Modules
+## Main modules
 
 - `App/`
-  - `AppDelegate`: app bootstrap, window, screen capture permission, app icon.
-  - `MainViewController`: integrates UI + renderer + capture target selection.
-  - `ControlPanelView`: user controls and telemetry display.
+  - `AppDelegate`: startup, windows, permissions bootstrap.
+  - `MainViewController`: control panel + session orchestration.
+  - `ControlPanelView`: Lossless-inspired runtime controls.
+  - `ScalingOverlayController`: dedicated output window lifecycle.
+  - `OutputViewController`: output HUD and diagnostics.
 - `Capture/`
   - `ScreenCaptureKitCaptureService`: primary capture backend.
-  - `CaptureSourceCatalog`: enumerates displays/windows.
-  - `FrameCaptureFactory`: backend selection.
+  - `CaptureSourceCatalog`: display/window source listing.
+  - `FrameCaptureFactory`: backend creation.
 - `Rendering/`
-  - `RendererCoordinator`: render loop, pacing, stats, frame history, composition.
-  - `Shaders/Present.metal`: full-screen pass (sampling, sharpen, blend).
+  - `RendererCoordinator`: render loop, frame staging, pacing, stats.
+  - `Shaders/Present.metal`: final present pass and sharpening.
 - `Upscaling/`
   - `MetalFXSpatialUpscaler`: `MTLFXSpatialScaler` wrapper.
 - `FrameGeneration/`
-  - `MetalFXFrameGenerationEngine`: MetalFX interpolation path (stub on current SDK setup).
+  - `MetalFXFrameGenerationEngine`: optical-flow estimate + warp interpolation.
 
-## Runtime state
+## Frame generation model
 
-- `CaptureConfiguration` controls capture parameters (fps, queue depth, cursor, target size).
-- `RenderSettings` controls upscaling/DRS/FG parameters.
-- `SettingsStore` provides thread-safe snapshots.
-- `RendererStats` publishes CAP/OUT FPS and resolution telemetry to UI.
+- Source frames are staged as `previous` and `current` textures.
+- A compute pass estimates low-resolution optical flow between frames.
+- A render pass warps both frames toward the interpolation time and blends them.
+- If FG path fails, renderer falls back to blend interpolation to avoid stalls.
 
-## Frame generation behavior
+## Telemetry
 
-- `frameGenerationEnabled = false`
-  - Presentation is paced close to capture FPS.
-- `frameGenerationEnabled = true`
-  - Tries MetalFX interpolation if support + auxiliary textures exist.
-  - Fallback uses blend interpolation between previous/current frames:
-    - `x2`: one intermediate frame (blend 0.5)
-    - `x3`: two intermediate frames (blend 1/3 and 2/3)
+`RendererStats` publishes:
+- `SOURCE FPS` (capture throughput)
+- `CAP FPS` (captured frames/sec)
+- `GEN FPS` (generated frames/sec)
+- `OUT FPS` (presented frames/sec)
+- input/output resolution and effective scale
+
+## Design constraints
+
+- Desktop capture does not provide perfect game-grade motion/depth vectors.
+- Therefore, quality is best-effort for window/display capture workloads.

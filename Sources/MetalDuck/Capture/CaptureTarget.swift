@@ -7,13 +7,13 @@ enum CaptureTarget: Equatable {
 }
 
 struct CaptureConfiguration {
-    var framesPerSecond: Int = 60
+    var framesPerSecond: Int = 30
     var queueDepth: Int = 5
     var showsCursor: Bool = false
     var preferredPixelSize: CGSize?
 
     init(
-        framesPerSecond: Int = 60,
+        framesPerSecond: Int = 30,
         queueDepth: Int = 5,
         showsCursor: Bool = false,
         preferredPixelSize: CGSize? = nil

@@ -76,5 +76,6 @@ fragment float4 fragmentPresent(
     float amount = uniforms.sharpness * 1.35;
 
     float3 sharpened = center + (center - neighbors) * amount;
-    return float4(max(sharpened, float3(0.0)), 1.0);
+    float3 color = clamp(sharpened, float3(0.0), float3(1.0));
+    return float4(color, 1.0);
 }
