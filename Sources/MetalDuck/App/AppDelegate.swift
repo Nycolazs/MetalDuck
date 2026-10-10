@@ -51,8 +51,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let viewController = try MainViewController(
                 context: metalContext,
                 captureService: captureService,
-                settingsStore: SettingsStore(),
-                captureConfiguration: captureConfiguration,
                 initialTarget: initialTarget,
                 outputView: overlayController.mtkView,
                 overlayController: overlayController
@@ -68,24 +66,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             Task { await viewController.start() }
             requestScreenCapturePermissionIfNeededAsync()
+            requestAccessibilityPermissionIfNeededAsync()
         } catch {
+            print("CRITICAL: Bootstrap failed: \(error)")
             presentFatalInitializationError(error)
         }
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let mainViewController else {
-            return
+            return .terminateNow
         }
 
-        let semaphore = DispatchSemaphore(value: 0)
-
-        Task {
+        Task { @MainActor in
             await mainViewController.stop()
-            semaphore.signal()
+            sender.reply(toApplicationShouldTerminate: true)
         }
 
-        semaphore.wait()
+        return .terminateLater
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -114,5 +112,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         _ = CGRequestScreenCaptureAccess()
+    }
+
+    private func requestAccessibilityPermissionIfNeededAsync() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
     }
 }

@@ -12,10 +12,16 @@ final class MainViewController: NSViewController {
 
     private let controlPanel = ControlPanelView(frame: .zero)
     private let renderer: RendererCoordinator
-    private let settingsStore: SettingsStore
+    private let settingsStore = SettingsStore()
+    private let profileManager = ProfileManager.shared
     private let overlayController: ScalingOverlayController
 
-    private var captureConfiguration: CaptureConfiguration
+    private var currentProcessObservation: NSKeyValueObservation?
+
+    private var autoRecoveryAttemptCount = 0
+    private var lastAutoRecoveryTime: CFTimeInterval = 0
+
+    private var captureConfiguration = CaptureConfiguration(framesPerSecond: 60, queueDepth: 5)
 
     private var selectedCaptureMode: CaptureModeChoice = .automatic
     private var selectedDisplayIndex: Int = 0
@@ -28,14 +34,10 @@ final class MainViewController: NSViewController {
     init(
         context: MetalContext,
         captureService: FrameCaptureService,
-        settingsStore: SettingsStore,
-        captureConfiguration: CaptureConfiguration,
         initialTarget: CaptureTarget,
         outputView: MTKView,
         overlayController: ScalingOverlayController
     ) throws {
-        self.settingsStore = settingsStore
-        self.captureConfiguration = captureConfiguration
         self.overlayController = overlayController
 
         self.renderer = try RendererCoordinator(
@@ -92,12 +94,29 @@ final class MainViewController: NSViewController {
         await refreshCaptureSources()
         controlPanel.setCaptureMode(selectedCaptureMode)
         applyCaptureTargetSelection()
-        controlPanel.apply(settings: settingsStore.snapshot(), capture: captureConfiguration)
+        
+        controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
+        applyProfile(profileManager.activeProfile)
+        
         controlPanel.setRunning(false)
         controlPanel.setStatus("Ready")
         overlayController.hide()
         updateWindowTitle()
+        setupShortcutManager()
     }
+
+    private func setupShortcutManager() {
+        ShortcutManager.shared.onTrigger = { [weak self] in
+            guard let self else { return }
+            if self.renderer.isRunning {
+                self.controlPanelDidPressStop(self.controlPanel)
+            } else {
+                self.controlPanelDidPressStart(self.controlPanel)
+            }
+        }
+        ShortcutManager.shared.update(settings: settingsStore.shortcut)
+    }
+
 
     func stop() async {
         await renderer.stop()
@@ -114,6 +133,47 @@ final class MainViewController: NSViewController {
             DispatchQueue.main.async {
                 self?.handleRendererStats(stats)
             }
+        }
+        
+        renderer.onGeometryUpdate = { [weak self] rect in
+            self?.overlayController.updateFrame(to: rect)
+        }
+        
+        renderer.onError = { [weak self] error in
+            DispatchQueue.main.async {
+                self?.handleRendererError(error)
+            }
+        }
+    }
+
+    private func handleRendererError(_ error: Error) {
+        if (error as? CaptureStaleError) == .framesStalled {
+            let now = CACurrentMediaTime()
+            if now - lastAutoRecoveryTime > 10.0 {
+                autoRecoveryAttemptCount = 0
+            }
+            
+            if autoRecoveryAttemptCount < 3 {
+                autoRecoveryAttemptCount += 1
+                lastAutoRecoveryTime = now
+                controlPanel.setStatus("Tracking new window (Fullscreen?)...", isError: false)
+                
+                Task {
+                    await renderer.stop()
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    let target = self.selectedCaptureTarget()
+                    let config = self.captureConfiguration
+                    try? await self.renderer.reconfigureCapture(target: target)
+                    try? await self.renderer.reconfigureCapture(configuration: config)
+                    try? await self.renderer.start()
+                }
+            } else {
+                controlPanel.setStatus("Capture stalled. Please refresh sources or capture Display.", isError: true)
+                overlayController.setCaptureError("Window lost. Check if window is visible.")
+            }
+        } else {
+            controlPanel.setStatus("Error: \(error.localizedDescription)", isError: true)
+            overlayController.setCaptureError(error.localizedDescription)
         }
     }
 
@@ -135,6 +195,9 @@ final class MainViewController: NSViewController {
         overlayController.updateStats(stats)
         if stats.isRunning {
             controlPanel.setStatus("Running")
+            if stats.captureFPS > 5.0 {
+                autoRecoveryAttemptCount = 0
+            }
         }
     }
 
@@ -209,7 +272,7 @@ final class MainViewController: NSViewController {
         case .automatic:
             return .automatic
         case .display:
-            guard !displayEntries.isEmpty else { return .display(nil) }
+            guard !displayEntries.isEmpty else { return .automatic }
             return displayEntries[min(selectedDisplayIndex, displayEntries.count - 1)].target
         case .window:
             guard !windowEntries.isEmpty else { return .window(nil) }
@@ -253,9 +316,9 @@ final class MainViewController: NSViewController {
     }
 
     private func updateRenderSettings(syncUI: Bool = false, _ mutate: (inout RenderSettings) -> Void) {
-        let updated = settingsStore.update(mutate)
+        let updated = settingsStore.update(action: mutate)
         if syncUI {
-            controlPanel.apply(settings: updated, capture: captureConfiguration)
+            controlPanel.apply(settings: updated, capture: captureConfiguration, profileName: profileManager.activeProfile.name)
         }
         updateWindowTitle()
     }
@@ -272,7 +335,7 @@ final class MainViewController: NSViewController {
     private func outputDisplayID(for target: CaptureTarget) -> CGDirectDisplayID? {
         switch target {
         case .display(let displayID):
-            return displayID ?? displayIDForScreen(view.window?.screen)
+            return displayID
         case .window(let windowID):
             return displayIDForWindow(windowID) ?? displayIDForScreen(view.window?.screen)
         case .automatic:
@@ -374,75 +437,43 @@ final class MainViewController: NSViewController {
         }
     }
 
-    private func applyPreset(_ preset: ControlPreset) {
-        var presetCaptureFPS: Int = captureConfiguration.framesPerSecond
-        var presetQueueDepth: Int = captureConfiguration.queueDepth
-        let settings = settingsStore.update { value in
-            switch preset {
-            case .performance:
-                presetCaptureFPS = 30
-                presetQueueDepth = 4
-                value.upscalingAlgorithm = .nativeLinear
-                value.outputScale = 1.0
-                value.matchOutputResolution = true
-                value.samplingMode = .nearest
-                value.sharpness = 0.0
-                value.dynamicResolutionEnabled = true
-                value.dynamicScaleMinimum = 0.70
-                value.dynamicScaleMaximum = 1.00
-                value.targetPresentationFPS = 60
-                value.frameGenerationEnabled = false
-                value.frameGenerationMode = .x2
+    private func applyProfile(_ profile: Profile) {
+        let settings = profile.settings
+        let capture = profile.capture
+        
+        applySettings(settings)
+        applyCaptureConfiguration(capture)
+        
+        controlPanel.apply(settings: settings, capture: capture, profileName: profile.name)
+        
+        // Update window title
+        let titleParts = [
+            "MetalDuck",
+            settings.upscalingAlgorithm.rawValue,
+            String(format: "%.2fx", settings.outputScale),
+            settings.matchOutputResolution ? "MatchOut On" : "MatchOut Off",
+            settings.dynamicResolutionEnabled ? "DRS On" : "DRS Off",
+            settings.frameGenerationEnabled ? "FG \(settings.frameGenerationMode.rawValue)" : "FG Off"
+        ]
+        view.window?.title = titleParts.joined(separator: " | ")
+    }
 
-            case .balanced:
-                presetCaptureFPS = 30
-                presetQueueDepth = 5
-                value.upscalingAlgorithm = .metalFXSpatial
-                value.outputScale = 1.15
-                value.matchOutputResolution = true
-                value.samplingMode = .linear
-                value.sharpness = 0.12
-                value.dynamicResolutionEnabled = false
-                value.dynamicScaleMinimum = 1.0
-                value.dynamicScaleMaximum = 1.0
-                value.targetPresentationFPS = 60
-                value.frameGenerationEnabled = true
-                value.frameGenerationMode = .x2
+    private func applySettings(_ settings: RenderSettings) {
+        settingsStore.upscalingAlgorithm = settings.upscalingAlgorithm
+        settingsStore.outputScale = settings.outputScale
+        settingsStore.matchOutputResolution = settings.matchOutputResolution
+        settingsStore.samplingMode = settings.samplingMode
+        settingsStore.sharpness = settings.sharpness
+        settingsStore.dynamicResolutionEnabled = settings.dynamicResolutionEnabled
+        settingsStore.dynamicScaleMinimum = settings.dynamicScaleMinimum
+        settingsStore.dynamicScaleMaximum = settings.dynamicScaleMaximum
+        settingsStore.targetPresentationFPS = settings.targetPresentationFPS
+        settingsStore.frameGenerationEnabled = settings.frameGenerationEnabled
+        settingsStore.frameGenerationMode = settings.frameGenerationMode
+    }
 
-            case .quality:
-                presetCaptureFPS = 30
-                presetQueueDepth = 6
-                value.upscalingAlgorithm = .metalFXSpatial
-                value.outputScale = 1.35
-                value.matchOutputResolution = false
-                value.samplingMode = .linear
-                value.sharpness = 0.22
-                value.dynamicResolutionEnabled = false
-                value.dynamicScaleMinimum = 1.0
-                value.dynamicScaleMaximum = 1.0
-                value.targetPresentationFPS = 60
-                value.frameGenerationEnabled = true
-                value.frameGenerationMode = .x2
-            }
-        }
-
-        if captureConfiguration.framesPerSecond != presetCaptureFPS || captureConfiguration.queueDepth != presetQueueDepth {
-            updateCaptureConfiguration { config in
-                config.framesPerSecond = presetCaptureFPS
-                config.queueDepth = presetQueueDepth
-            }
-        }
-
-        controlPanel.apply(settings: settings, capture: captureConfiguration)
-        switch preset {
-        case .performance:
-            controlPanel.setStatus("Preset applied: Performance (max FPS / low latency)")
-        case .balanced:
-            controlPanel.setStatus("Preset applied: Balanced (30 -> 60 + moderate upscale)")
-        case .quality:
-            controlPanel.setStatus("Preset applied: Quality (strong upscale + FG)")
-        }
-        updateWindowTitle()
+    private func applyCaptureConfiguration(_ config: CaptureConfiguration) {
+        self.captureConfiguration = config
     }
 
     override var acceptsFirstResponder: Bool {
@@ -619,6 +650,12 @@ extension MainViewController: ControlPanelViewDelegate {
         panel.setStatus(String(format: "Scale factor: %.2fx", scale))
     }
 
+    func controlPanelDidRequestSettings(_ panel: ControlPanelView) {
+        let settingsVC = SettingsViewController(settingsStore: settingsStore)
+        presentAsSheet(settingsVC)
+    }
+
+
     func controlPanel(_ panel: ControlPanelView, didToggleMatchOutputResolution enabled: Bool) {
         updateRenderSettings { settings in
             settings.matchOutputResolution = enabled
@@ -686,19 +723,99 @@ extension MainViewController: ControlPanelViewDelegate {
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationMode mode: FrameGenerationMode) {
-        updateRenderSettings(syncUI: true) { settings in
-            settings.frameGenerationMode = mode
-            guard settings.frameGenerationEnabled else { return }
-            let multiplier = mode == .x2 ? 2 : 3
-            let minimumTarget = max(60, captureConfiguration.framesPerSecond * multiplier)
-            if settings.targetPresentationFPS < minimumTarget {
-                settings.targetPresentationFPS = minimumTarget
-            }
-        }
+        settingsStore.frameGenerationMode = mode
+        updateWindowTitle()
         panel.setStatus("FG Mode: \(mode.rawValue)")
     }
 
-    func controlPanel(_ panel: ControlPanelView, didSelectPreset preset: ControlPreset) {
-        applyPreset(preset)
+
+    func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID) {
+        profileManager.selectProfile(id: id)
+        controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
+        applyProfile(profileManager.activeProfile)
+    }
+
+    func controlPanelDidRequestAddProfile(_ panel: ControlPanelView) {
+        let addVC = AddProfileViewController()
+        addVC.delegate = self
+        presentAsSheet(addVC)
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didRequestRenameProfile id: UUID) {
+        guard let profile = profileManager.profiles.first(where: { $0.id == id }), !profile.isBuiltIn else { return }
+        
+        let renameVC = RenameProfileViewController(currentName: profile.name)
+        renameVC.delegate = self
+        renameVC.representedObject = id
+        presentAsSheet(renameVC)
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didRequestDuplicateProfile id: UUID) {
+        let profile = profileManager.activeProfile
+        let new = profileManager.duplicateProfile(profile)
+        profileManager.selectProfile(id: new.id)
+        controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
+        applyProfile(profileManager.activeProfile)
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didRequestDeleteProfile id: UUID) {
+        guard let profile = profileManager.profiles.first(where: { $0.id == id }), !profile.isBuiltIn else { return }
+        
+        let deleteVC = DeleteProfileViewController(profileName: profile.name)
+        deleteVC.delegate = self
+        deleteVC.representedObject = id
+        presentAsSheet(deleteVC)
     }
 }
+
+extension MainViewController: AddProfileViewControllerDelegate {
+    func addProfileViewController(_ vc: AddProfileViewController, didCreateProfileWithName name: String) {
+        dismiss(vc)
+        let new = profileManager.createProfile(
+            name: name,
+            settings: profileManager.activeProfile.settings,
+            capture: profileManager.activeProfile.capture
+        )
+        profileManager.selectProfile(id: new.id)
+        controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
+        applyProfile(profileManager.activeProfile)
+    }
+    
+    func addProfileViewControllerDidCancel(_ vc: AddProfileViewController) {
+        dismiss(vc)
+    }
+}
+
+extension MainViewController: RenameProfileViewControllerDelegate {
+    func renameProfileViewController(_ vc: RenameProfileViewController, didRenameProfileWithName name: String) {
+        guard let id = vc.representedObject as? UUID else { return }
+        dismiss(vc)
+        profileManager.renameProfile(id: id, newName: name)
+        controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
+        if profileManager.activeProfileId == id {
+            if let profile = profileManager.profiles.first(where: { $0.id == id }) {
+                controlPanel.apply(settings: profile.settings, capture: profile.capture, profileName: name)
+            }
+        }
+    }
+    
+    func renameProfileViewControllerDidCancel(_ vc: RenameProfileViewController) {
+        dismiss(vc)
+    }
+}
+
+extension MainViewController: DeleteProfileViewControllerDelegate {
+    func deleteProfileViewControllerDidConfirm(_ vc: DeleteProfileViewController) {
+        guard let id = vc.representedObject as? UUID else { return }
+        dismiss(vc)
+        profileManager.deleteProfile(id: id)
+        controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
+        applyProfile(profileManager.activeProfile)
+    }
+    
+    func deleteProfileViewControllerDidCancel(_ vc: DeleteProfileViewController) {
+        dismiss(vc)
+    }
+}
+
+

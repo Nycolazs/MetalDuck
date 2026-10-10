@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SDKROOT_PATH="${SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk}"
+SDKROOT_PATH="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || echo /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk)}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 cd "$ROOT_DIR"
@@ -33,8 +33,9 @@ APP_DIR="$STAGE_DIR/$APP_BUNDLE_NAME"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
-DMG_PATH="$ROOT_DIR/dist/MetalDuck-macos-arm64.dmg"
+DMG_PATH="$ROOT_DIR/dist/MetalDuck-1.2.0.dmg"
 
+rm -rf "$ROOT_DIR/dist/"*
 rm -rf "$STAGE_DIR" "$DMG_STAGE_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$DMG_STAGE_DIR"
 
@@ -44,7 +45,10 @@ if [[ -d "$BUNDLE_DIR" ]]; then
   cp -R "$BUNDLE_DIR" "$RESOURCES_DIR/"
 fi
 if [[ -f "$ICON_FILE" ]]; then
+  echo "Found icon at $ICON_FILE, copying to $RESOURCES_DIR/AppIcon.icns"
   cp "$ICON_FILE" "$RESOURCES_DIR/AppIcon.icns"
+else
+  echo "ICON NOT FOUND AT $ICON_FILE" >&2
 fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
@@ -59,9 +63,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key>
   <string>com.nycolazs.metaldduck</string>
   <key>CFBundleVersion</key>
-  <string>0.1.1</string>
+  <string>1.2.0</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.1</string>
+  <string>1.2.0</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleExecutable</key>
@@ -83,15 +87,70 @@ echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
 codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
+# Assemble the DMG stage directory
 cp -R "$APP_DIR" "$DMG_STAGE_DIR/"
 ln -s /Applications "$DMG_STAGE_DIR/Applications"
 
-rm -f "$DMG_PATH"
-hdiutil create \
-  -volname "MetalDuck" \
-  -srcfolder "$DMG_STAGE_DIR" \
-  -ov \
-  -format UDZO \
-  "$DMG_PATH" >/dev/null
+# Set up the DMG background (SKIPPED - Background removed)
+# mkdir -p "$DMG_STAGE_DIR/.background"
+
+# Create a temporary empty DMG to configure layout
+TEMP_DMG="${DMG_PATH}.temp.dmg"
+MOUNT_DIR=$(mktemp -d /tmp/metaldduck_mount.XXXXXX)
+
+# Robust cleanup on exit
+cleanup() {
+  echo "Cleaning up..."
+  hdiutil detach "$MOUNT_DIR" 2>/dev/null || true
+  rm -f "$TEMP_DMG"
+  rmdir "$MOUNT_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+rm -f "$TEMP_DMG" "$DMG_PATH"
+
+echo "Creating temporary DMG..."
+hdiutil create -srcfolder "$DMG_STAGE_DIR" -volname "MetalDuck" -fs HFS+ -format UDRW -ov "$TEMP_DMG"
+
+echo "Mounting temporary DMG..."
+hdiutil attach "$TEMP_DMG" -mountpoint "$MOUNT_DIR" -noautoopen
+
+echo "Configuring DMG layout..."
+osascript <<APPLESCRIPT
+tell application "Finder"
+    set theWindow to make new Finder window to (POSIX file "$MOUNT_DIR") as alias
+    tell theWindow
+        open
+        set current view to icon view
+        set toolbar visible to false
+        set statusbar visible to false
+        set the bounds to {400, 100, 900, 400} -- 500x300 window
+    end tell
+    
+    tell the icon view options of theWindow
+        set icon size to 128
+        set arrangement to not arranged
+        -- background picture removed
+    end tell
+    
+    set position of item "MetalDuck.app" of theWindow to {160, 150}
+    set position of item "Applications" of theWindow to {340, 150}
+    
+    update item "MetalDuck.app" of theWindow
+    update item "Applications" of theWindow
+    
+    delay 2
+    close theWindow
+end tell
+APPLESCRIPT
+
+echo "Detaching DMG..."
+hdiutil detach "$MOUNT_DIR"
+
+echo "Converting to final DMG..."
+hdiutil convert "$TEMP_DMG" -format UDZO -o "$DMG_PATH"
+
+echo "Finalizing output..."
+rm -rf "$STAGE_DIR" "$DMG_STAGE_DIR"
 
 echo "Release package created: $DMG_PATH"

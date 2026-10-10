@@ -2,68 +2,363 @@ import AppKit
 import Foundation
 
 private enum UITheme {
-    static let bgTop = NSColor(calibratedRed: 0.11, green: 0.15, blue: 0.24, alpha: 1.0)
-    static let bgBottom = NSColor(calibratedRed: 0.06, green: 0.09, blue: 0.16, alpha: 1.0)
+    static let bgTop = NSColor(calibratedRed: 0.12, green: 0.13, blue: 0.16, alpha: 1.0)
+    static let bgBottom = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1.0)
 
-    static let chrome = NSColor(calibratedRed: 0.16, green: 0.21, blue: 0.31, alpha: 0.95)
-    static let sidebar = NSColor(calibratedRed: 0.14, green: 0.18, blue: 0.28, alpha: 0.97)
-    static let card = NSColor(calibratedRed: 0.24, green: 0.29, blue: 0.39, alpha: 0.95)
-    static let cardBorder = NSColor(calibratedRed: 0.28, green: 0.36, blue: 0.48, alpha: 1.0)
+    static let chrome = NSColor(calibratedRed: 0.15, green: 0.16, blue: 0.19, alpha: 0.95)
+    static let sidebar = NSColor(calibratedRed: 0.13, green: 0.14, blue: 0.17, alpha: 0.97)
+    static let card = NSColor(calibratedRed: 0.16, green: 0.17, blue: 0.20, alpha: 0.60)
+    static let cardBorder = NSColor(calibratedRed: 0.26, green: 0.27, blue: 0.32, alpha: 0.35)
 
-    static let title = NSColor(calibratedRed: 0.95, green: 0.97, blue: 0.99, alpha: 1.0)
-    static let body = NSColor(calibratedRed: 0.85, green: 0.89, blue: 0.93, alpha: 1.0)
-    static let muted = NSColor(calibratedRed: 0.70, green: 0.76, blue: 0.84, alpha: 1.0)
-    static let accent = NSColor(calibratedRed: 0.17, green: 0.58, blue: 0.95, alpha: 1.0)
+    static let title = NSColor(calibratedRed: 0.93, green: 0.94, blue: 0.96, alpha: 1.0)
+    static let body = NSColor(calibratedRed: 0.78, green: 0.80, blue: 0.84, alpha: 1.0)
+    static let muted = NSColor(calibratedRed: 0.50, green: 0.53, blue: 0.58, alpha: 1.0)
+    static let accent = NSColor(calibratedRed: 0.30, green: 0.56, blue: 0.93, alpha: 1.0)
 }
 
 private final class FlippedPanelContainerView: NSView {
     override var isFlipped: Bool { true }
 }
 
+private final class FlippedStackView: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
 private final class CardView: NSView {
     let contentStack = NSStackView()
 
-    init(title: String) {
+    private let titleLabel: NSTextField
+    private let headerAccessory: NSView?
+
+    init(title: String, iconName: String? = nil, headerAccessory: NSView? = nil) {
+        self.titleLabel = NSTextField(labelWithString: title)
+        self.headerAccessory = headerAccessory
         super.init(frame: .zero)
 
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = 14
-        layer?.borderWidth = 1
-        layer?.borderColor = UITheme.cardBorder.withAlphaComponent(0.75).cgColor
+        layer?.cornerRadius = 12
+        layer?.borderWidth = 0
         layer?.backgroundColor = UITheme.card.cgColor
         layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.18
-        layer?.shadowRadius = 10
+        layer?.shadowOpacity = 0.04
+        layer?.shadowRadius = 6
         layer?.shadowOffset = CGSize(width: 0, height: -1)
 
-        let heading = NSTextField(labelWithString: title)
-        heading.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
-        heading.textColor = UITheme.title
+        titleLabel.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.textColor = UITheme.title
 
         contentStack.orientation = .vertical
         contentStack.alignment = .leading
-        contentStack.spacing = 8
+        contentStack.spacing = 10
 
-        let root = NSStackView(views: [heading, contentStack])
+        var headerViews: [NSView] = []
+        if let iconName {
+            let icon = NSImageView()
+            icon.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+            icon.contentTintColor = UITheme.title
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
+            headerViews.append(icon)
+        }
+        headerViews.append(titleLabel)
+        
+        if let headerAccessory {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            headerViews.append(spacer)
+            headerViews.append(headerAccessory)
+        }
+
+        let header = NSStackView(views: headerViews)
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+
+        let divider = NSView()
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = UITheme.cardBorder.withAlphaComponent(0.5).cgColor
+        divider.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
+
+        let root = NSStackView(views: [header, divider, contentStack])
         root.translatesAutoresizingMaskIntoConstraints = false
         root.orientation = .vertical
         root.alignment = .leading
-        root.spacing = 10
+        root.spacing = 8
+        root.setHuggingPriority(.required, for: .vertical)
 
         addSubview(root)
 
+        // Single strategy: pin root to card edges, pin children to root width
         NSLayoutConstraint.activate([
             root.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             root.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
             root.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            root.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+            root.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            divider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            contentStack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            contentStack.trailingAnchor.constraint(equalTo: root.trailingAnchor)
         ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    func setTitle(_ title: String) {
+        titleLabel.stringValue = title
+    }
+}
+
+private final class PresetButton: NSView {
+    let preset: ControlPreset
+    let nameLabel: NSTextField
+    let indicator: NSView
+    
+    var target: AnyObject?
+    var action: Selector?
+    
+    private(set) var isActive: Bool
+    
+    init(preset: ControlPreset, isActive: Bool) {
+        self.preset = preset
+        self.isActive = isActive
+        let title = "\(preset)".prefix(1).uppercased() + "\(preset)".dropFirst()
+        self.nameLabel = NSTextField(labelWithString: title)
+        self.indicator = NSView()
+        
+        super.init(frame: .zero)
+        
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.wantsLayer = true
+        indicator.layer?.cornerRadius = 3
+        indicator.layer?.backgroundColor = UITheme.accent.cgColor
+        indicator.isHidden = !isActive
+        
+        nameLabel.font = NSFont.systemFont(ofSize: 13, weight: isActive ? .semibold : .medium)
+        nameLabel.textColor = isActive ? UITheme.title : UITheme.muted
+        nameLabel.isEditable = false
+        nameLabel.isBordered = false
+        nameLabel.drawsBackground = false
+        
+        let stack = NSStackView(views: [indicator, nameLabel])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        
+        addSubview(stack)
+        
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 34),
+            indicator.widthAnchor.constraint(equalToConstant: 6),
+            indicator.heightAnchor.constraint(equalToConstant: 6),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        
+        updateAppearance()
+        
+        let trackingArea = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+    }
+    
+    required init?(coder: NSCoder) { fatalError() }
+    
+    private func updateAppearance(isHovered: Bool = false) {
+        if isActive {
+            layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.25).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = UITheme.accent.withAlphaComponent(0.4).cgColor
+        } else if isHovered {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderWidth = 0
+        }
+    }
+    
+    override func mouseEntered(with event: NSEvent) {
+        updateAppearance(isHovered: true)
+    }
+    
+    override func mouseExited(with event: NSEvent) {
+        updateAppearance(isHovered: false)
+    }
+    
+    override func mouseDown(with event: NSEvent) {
+        layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.4).cgColor
+        let _ = target?.perform(action, with: self)
+    }
+}
+
+
+private final class SidebarIconButton: NSButton {
+    var drawsBackground: Bool = true {
+        didSet { updateAppearance() }
+    }
+    
+    var onHover: ((Bool) -> Void)?
+    
+    private var isHovered: Bool = false {
+        didSet { 
+            updateAppearance()
+            onHover?(isHovered)
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        title = ""
+        bezelStyle = .inline
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.backgroundColor = UITheme.card.cgColor
+        contentTintColor = UITheme.body
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect]
+        addTrackingArea(NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        isHovered = false
+    }
+
+    private func updateAppearance() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            if isHovered {
+                layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.3).cgColor
+                contentTintColor = UITheme.title
+            } else {
+                layer?.backgroundColor = drawsBackground ? UITheme.card.cgColor : NSColor.clear.cgColor
+                contentTintColor = UITheme.body
+            }
+
+        }
+    }
+}
+
+private final class ProfileButton: NSView {
+
+    let profileId: UUID
+    let nameLabel: NSTextField
+    let indicator: NSView
+    
+    var target: AnyObject?
+    var action: Selector?
+    
+    private(set) var isActive: Bool
+    
+    init(profile: Profile, isActive: Bool) {
+        self.profileId = profile.id
+        self.isActive = isActive
+        self.nameLabel = NSTextField(labelWithString: profile.name)
+        self.indicator = NSView()
+        
+        super.init(frame: .zero)
+        
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.wantsLayer = true
+        indicator.layer?.cornerRadius = 3
+        indicator.layer?.backgroundColor = UITheme.accent.cgColor
+        indicator.isHidden = !isActive
+        
+        nameLabel.font = NSFont.systemFont(ofSize: 14, weight: isActive ? .semibold : .medium)
+        nameLabel.textColor = isActive ? UITheme.title : UITheme.body.withAlphaComponent(0.8)
+
+        nameLabel.isEditable = false
+        nameLabel.isBordered = false
+        nameLabel.drawsBackground = false
+        
+        let stack = NSStackView(views: [indicator, nameLabel])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        
+        addSubview(stack)
+        
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 34),
+            indicator.widthAnchor.constraint(equalToConstant: 6),
+            indicator.heightAnchor.constraint(equalToConstant: 6),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+        
+        updateAppearance()
+        
+        let trackingArea = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(trackingArea)
+    }
+    
+    required init?(coder: NSCoder) { fatalError() }
+    
+    private func updateAppearance(isHovered: Bool = false) {
+        if isActive {
+            layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.25).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = UITheme.accent.withAlphaComponent(0.4).cgColor
+        } else if isHovered {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+            layer?.borderWidth = 1
+            layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            layer?.borderWidth = 0
+        }
+
+    }
+    
+    override func mouseEntered(with event: NSEvent) {
+        updateAppearance(isHovered: true)
+    }
+    
+    override func mouseExited(with event: NSEvent) {
+        updateAppearance(isHovered: false)
+    }
+    
+    override func mouseDown(with event: NSEvent) {
+        layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.4).cgColor
+        let _ = target?.perform(action, with: self)
     }
 }
 
@@ -117,7 +412,12 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didToggleFrameGeneration enabled: Bool)
     func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationMode mode: FrameGenerationMode)
 
-    func controlPanel(_ panel: ControlPanelView, didSelectPreset preset: ControlPreset)
+    func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID)
+    func controlPanelDidRequestAddProfile(_ panel: ControlPanelView)
+    func controlPanelDidRequestSettings(_ panel: ControlPanelView)
+    func controlPanel(_ panel: ControlPanelView, didRequestRenameProfile id: UUID)
+    func controlPanel(_ panel: ControlPanelView, didRequestDuplicateProfile id: UUID)
+    func controlPanel(_ panel: ControlPanelView, didRequestDeleteProfile id: UUID)
 }
 
 @MainActor
@@ -130,32 +430,32 @@ final class ControlPanelView: NSView {
     private let appSubtitleLabel = NSTextField(labelWithString: "Lossless Scaling for Apple Silicon")
     private let profileTitleLabel = NSTextField(labelWithString: "Profile: \"Default\"")
 
-    private let sessionStateTag = NSTextField(labelWithString: "SESSION")
+    private let statusDot = NSView()
     private let statusLabel = NSTextField(labelWithString: "Stopped")
     private let statsLabel = NSTextField(labelWithString: "SOURCE 0.0 FPS | OUT 0.0 FPS")
 
     private let startButton = NSButton(title: "Scale", target: nil, action: nil)
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
 
-    private let captureModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let captureSourcePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let captureModeDropdown = CompactDropdown()
+    private let captureSourceDropdown = CompactDropdown()
     private let refreshSourcesButton = NSButton(title: "Refresh", target: nil, action: nil)
 
-    private let captureCursorCheckbox = NSButton(checkboxWithTitle: "Capture cursor", target: nil, action: nil)
+    private let captureCursorSwitch = NSSwitch()
     private let captureFPSSlider = NSSlider(value: 30, minValue: 15, maxValue: 120, target: nil, action: nil)
     private let captureFPSValueLabel = NSTextField(labelWithString: "30")
     private let queueDepthSlider = NSSlider(value: 5, minValue: 1, maxValue: 8, target: nil, action: nil)
     private let queueDepthValueLabel = NSTextField(labelWithString: "5")
 
-    private let upscalerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let upscalerDropdown = CompactDropdown()
     private let outputScaleSlider = NSSlider(value: 1.5, minValue: 0.75, maxValue: 3.0, target: nil, action: nil)
     private let outputScaleValueLabel = NSTextField(labelWithString: "1.50x")
-    private let matchOutputResolutionCheckbox = NSButton(checkboxWithTitle: "Resize before scaling", target: nil, action: nil)
-    private let samplingPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let matchOutputResolutionSwitch = NSSwitch()
+    private let samplingDropdown = CompactDropdown()
     private let sharpnessSlider = NSSlider(value: 0.0, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let sharpnessValueLabel = NSTextField(labelWithString: "0.00")
 
-    private let dynamicResolutionCheckbox = NSButton(checkboxWithTitle: "Dynamic Resolution", target: nil, action: nil)
+    private let dynamicResolutionSwitch = NSSwitch()
     private let dynamicMinSlider = NSSlider(value: 0.75, minValue: 0.5, maxValue: 1.0, target: nil, action: nil)
     private let dynamicMinValueLabel = NSTextField(labelWithString: "0.75")
     private let dynamicMaxSlider = NSSlider(value: 1.0, minValue: 0.6, maxValue: 1.25, target: nil, action: nil)
@@ -163,12 +463,21 @@ final class ControlPanelView: NSView {
     private let targetFPSSlider = NSSlider(value: 60, minValue: 30, maxValue: 240, target: nil, action: nil)
     private let targetFPSValueLabel = NSTextField(labelWithString: "60")
 
-    private let frameGenerationCheckbox = NSButton(checkboxWithTitle: "Enable Frame Generation", target: nil, action: nil)
-    private let frameGenerationModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let frameGenerationSwitch = NSSwitch()
+    private let frameGenerationModeDropdown = CompactDropdown()
 
-    private let presetSegmented = NSSegmentedControl(labels: ["Performance", "Balanced", "Quality"], trackingMode: .selectOne, target: nil, action: nil)
+    private let profileListStack = FlippedStackView()
+    private let addProfileButton = SidebarIconButton()
+    private let duplicateProfileButton = SidebarIconButton()
+    private let renameProfileButton = SidebarIconButton()
+    private let deleteProfileButton = SidebarIconButton()
+
+    private var activeProfileId: UUID?
 
     private let backgroundGradient = CAGradientLayer()
+    private let advancedToggleButton = NSButton(title: "", target: nil, action: nil)
+    private let advancedContentStack = NSStackView()
+    private var isAdvancedVisible = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -187,20 +496,21 @@ final class ControlPanelView: NSView {
         backgroundGradient.frame = bounds
     }
 
-    func apply(settings: RenderSettings, capture: CaptureConfiguration) {
+    func apply(settings: RenderSettings, capture: CaptureConfiguration, profileName: String) {
         isApplyingValues = true
 
-        upscalerPopup.selectItem(withTitle: settings.upscalingAlgorithm.rawValue)
+        profileTitleLabel.stringValue = "Profile: \"\(profileName)\""
+        upscalerDropdown.selectItem(withTitle: settings.upscalingAlgorithm.rawValue)
         outputScaleSlider.floatValue = settings.outputScale
         outputScaleValueLabel.stringValue = String(format: "%.2fx", settings.outputScale)
-        matchOutputResolutionCheckbox.state = settings.matchOutputResolution ? .on : .off
+        matchOutputResolutionSwitch.state = settings.matchOutputResolution ? .on : .off
 
-        samplingPopup.selectItem(withTitle: settings.samplingMode.rawValue)
+        samplingDropdown.selectItem(withTitle: settings.samplingMode.rawValue)
 
         sharpnessSlider.floatValue = settings.sharpness
         sharpnessValueLabel.stringValue = String(format: "%.2f", settings.sharpness)
 
-        dynamicResolutionCheckbox.state = settings.dynamicResolutionEnabled ? .on : .off
+        dynamicResolutionSwitch.state = settings.dynamicResolutionEnabled ? .on : .off
         dynamicMinSlider.floatValue = settings.dynamicScaleMinimum
         dynamicMaxSlider.floatValue = settings.dynamicScaleMaximum
         dynamicMinValueLabel.stringValue = String(format: "%.2f", settings.dynamicScaleMinimum)
@@ -209,10 +519,10 @@ final class ControlPanelView: NSView {
         targetFPSSlider.integerValue = settings.targetPresentationFPS
         targetFPSValueLabel.stringValue = "\(settings.targetPresentationFPS)"
 
-        frameGenerationCheckbox.state = settings.frameGenerationEnabled ? .on : .off
-        frameGenerationModePopup.selectItem(withTitle: settings.frameGenerationMode.rawValue)
+        frameGenerationSwitch.state = settings.frameGenerationEnabled ? .on : .off
+        frameGenerationModeDropdown.selectItem(withTitle: settings.frameGenerationMode.rawValue)
 
-        captureCursorCheckbox.state = capture.showsCursor ? .on : .off
+        captureCursorSwitch.state = capture.showsCursor ? .on : .off
         captureFPSSlider.integerValue = capture.framesPerSecond
         captureFPSValueLabel.stringValue = "\(capture.framesPerSecond)"
         queueDepthSlider.integerValue = capture.queueDepth
@@ -224,23 +534,22 @@ final class ControlPanelView: NSView {
     }
 
     func setCaptureMode(_ mode: CaptureModeChoice) {
-        captureModePopup.selectItem(at: mode.rawValue)
+        captureModeDropdown.selectItem(at: mode.rawValue)
     }
 
     func setCaptureSourceTitles(_ titles: [String], selectedIndex: Int?) {
-        captureSourcePopup.removeAllItems()
-
         if titles.isEmpty {
-            captureSourcePopup.addItem(withTitle: "No source found")
-            captureSourcePopup.isEnabled = false
+            captureSourceDropdown.items = ["No source found"]
+            captureSourceDropdown.selectItem(at: 0)
+            captureSourceDropdown.isEnabled = false
             return
         }
 
-        captureSourcePopup.isEnabled = true
-        captureSourcePopup.addItems(withTitles: titles)
+        captureSourceDropdown.isEnabled = true
+        captureSourceDropdown.items = titles
 
         if let selectedIndex, selectedIndex >= 0, selectedIndex < titles.count {
-            captureSourcePopup.selectItem(at: selectedIndex)
+            captureSourceDropdown.selectItem(at: selectedIndex)
         }
     }
 
@@ -251,15 +560,26 @@ final class ControlPanelView: NSView {
         startButton.alphaValue = running ? 0.75 : 1.0
         stopButton.alphaValue = running ? 1.0 : 0.75
 
-        statusLabel.textColor = running ? NSColor.systemGreen : NSColor.systemOrange
+        if running {
+            statusLabel.textColor = UITheme.accent
+            statusDot.layer?.backgroundColor = UITheme.accent.cgColor
+        } else {
+            statusLabel.textColor = UITheme.muted
+            statusDot.layer?.backgroundColor = UITheme.muted.cgColor
+        }
     }
 
     func setStatus(_ message: String, isError: Bool = false) {
         statusLabel.stringValue = message
         if isError {
             statusLabel.textColor = NSColor.systemRed
+            statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        } else if stopButton.isEnabled {
+            statusLabel.textColor = UITheme.accent
+            statusDot.layer?.backgroundColor = UITheme.accent.cgColor
         } else {
-            statusLabel.textColor = stopButton.isEnabled ? NSColor.systemGreen : NSColor.systemOrange
+            statusLabel.textColor = UITheme.muted
+            statusDot.layer?.backgroundColor = UITheme.muted.cgColor
         }
     }
 
@@ -279,68 +599,107 @@ final class ControlPanelView: NSView {
     }
 
     private func configureControls() {
-        appNameLabel.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+        appNameLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
         appNameLabel.textColor = UITheme.title
 
-        appSubtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        appSubtitleLabel.textColor = UITheme.muted
+        appSubtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        appSubtitleLabel.textColor = UITheme.muted.withAlphaComponent(0.7)
 
-        profileTitleLabel.font = NSFont.systemFont(ofSize: 44, weight: .bold)
+        profileTitleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
         profileTitleLabel.textColor = UITheme.title
 
-        sessionStateTag.font = NSFont.systemFont(ofSize: 11, weight: .bold)
-        sessionStateTag.textColor = UITheme.accent
+        statusDot.translatesAutoresizingMaskIntoConstraints = false
+        statusDot.wantsLayer = true
+        statusDot.layer?.cornerRadius = 4
+        statusDot.layer?.backgroundColor = UITheme.muted.cgColor
+        NSLayoutConstraint.activate([
+            statusDot.widthAnchor.constraint(equalToConstant: 8),
+            statusDot.heightAnchor.constraint(equalToConstant: 8)
+        ])
 
-        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 34, weight: .semibold)
-        statusLabel.textColor = NSColor.systemOrange
+        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 24, weight: .semibold)
+        statusLabel.textColor = UITheme.muted
 
         statsLabel.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
         statsLabel.textColor = UITheme.body
         statsLabel.lineBreakMode = .byWordWrapping
 
         startButton.bezelStyle = .rounded
-        startButton.bezelColor = UITheme.accent
+        startButton.wantsLayer = true
+        startButton.isBordered = false
+        startButton.layer?.cornerRadius = 8
+        startButton.layer?.backgroundColor = UITheme.accent.cgColor
         startButton.contentTintColor = .white
         startButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        startButton.translatesAutoresizingMaskIntoConstraints = false
+        startButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
+        startButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
 
         stopButton.bezelStyle = .rounded
-        stopButton.bezelColor = NSColor(calibratedRed: 0.30, green: 0.34, blue: 0.42, alpha: 1.0)
+        stopButton.wantsLayer = true
+        stopButton.isBordered = false
+        stopButton.layer?.cornerRadius = 8
+        stopButton.layer?.backgroundColor = NSColor(calibratedRed: 0.20, green: 0.21, blue: 0.25, alpha: 1.0).cgColor
         stopButton.contentTintColor = UITheme.body
         stopButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
         stopButton.isEnabled = false
         stopButton.alphaValue = 0.75
+        stopButton.translatesAutoresizingMaskIntoConstraints = false
+        stopButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
+        stopButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
 
         refreshSourcesButton.bezelStyle = .rounded
+        refreshSourcesButton.wantsLayer = true
+        refreshSourcesButton.isBordered = false
+        refreshSourcesButton.layer?.cornerRadius = 6
+        refreshSourcesButton.layer?.backgroundColor = UITheme.card.cgColor
+        refreshSourcesButton.layer?.borderWidth = 1
+        refreshSourcesButton.layer?.borderColor = UITheme.cardBorder.cgColor
+        refreshSourcesButton.contentTintColor = UITheme.body
         refreshSourcesButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        refreshSourcesButton.translatesAutoresizingMaskIntoConstraints = false
+        refreshSourcesButton.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        refreshSourcesButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
 
-        [captureModePopup, captureSourcePopup, upscalerPopup, samplingPopup, frameGenerationModePopup].forEach {
-            $0.controlSize = .regular
-            $0.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        // CompactDropdown configuration
+        captureModeDropdown.items = CaptureModeChoice.allCases.map(\.title)
+        captureModeDropdown.selectItem(at: CaptureModeChoice.automatic.rawValue)
+        captureModeDropdown.onSelectionChanged = { [weak self] _, index in
+            guard let self, !self.isApplyingValues,
+                  let mode = CaptureModeChoice(rawValue: index) else { return }
+            self.delegate?.controlPanel(self, didSelectCaptureMode: mode)
         }
 
-        CaptureModeChoice.allCases.forEach { captureModePopup.addItem(withTitle: $0.title) }
-        captureModePopup.selectItem(at: CaptureModeChoice.automatic.rawValue)
-        captureModePopup.target = self
-        captureModePopup.action = #selector(handleCaptureModeChanged)
+        captureSourceDropdown.onSelectionChanged = { [weak self] _, index in
+            guard let self, !self.isApplyingValues else { return }
+            self.delegate?.controlPanel(self, didSelectCaptureSourceAt: index)
+        }
 
-        captureSourcePopup.target = self
-        captureSourcePopup.action = #selector(handleCaptureSourceChanged)
+        upscalerDropdown.items = UpscalingAlgorithm.allCases.map(\.rawValue)
+        upscalerDropdown.onSelectionChanged = { [weak self] title, _ in
+            guard let self, !self.isApplyingValues,
+                  let value = UpscalingAlgorithm(rawValue: title) else { return }
+            self.delegate?.controlPanel(self, didChangeUpscalingAlgorithm: value)
+        }
 
-        upscalerPopup.addItems(withTitles: UpscalingAlgorithm.allCases.map(\.rawValue))
-        upscalerPopup.target = self
-        upscalerPopup.action = #selector(handleUpscalerChanged)
+        samplingDropdown.items = SamplingMode.allCases.map(\.rawValue)
+        samplingDropdown.onSelectionChanged = { [weak self] title, _ in
+            guard let self, !self.isApplyingValues,
+                  let value = SamplingMode(rawValue: title) else { return }
+            self.delegate?.controlPanel(self, didChangeSamplingMode: value)
+        }
 
-        samplingPopup.addItems(withTitles: SamplingMode.allCases.map(\.rawValue))
-        samplingPopup.target = self
-        samplingPopup.action = #selector(handleSamplingChanged)
+        frameGenerationModeDropdown.items = FrameGenerationMode.allCases.map(\.rawValue)
+        frameGenerationModeDropdown.onSelectionChanged = { [weak self] title, _ in
+            guard let self, !self.isApplyingValues,
+                  let mode = FrameGenerationMode(rawValue: title) else { return }
+            self.delegate?.controlPanel(self, didChangeFrameGenerationMode: mode)
+        }
 
-        frameGenerationModePopup.addItems(withTitles: FrameGenerationMode.allCases.map(\.rawValue))
-        frameGenerationModePopup.target = self
-        frameGenerationModePopup.action = #selector(handleFrameGenerationModeChanged)
-
-        [captureCursorCheckbox, matchOutputResolutionCheckbox, dynamicResolutionCheckbox, frameGenerationCheckbox].forEach {
-            $0.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-            $0.contentTintColor = UITheme.body
+        // Switch configuration
+        [captureCursorSwitch, matchOutputResolutionSwitch, frameGenerationSwitch, dynamicResolutionSwitch].forEach {
+            $0.controlSize = .regular
+            $0.state = .off
         }
 
         [captureFPSSlider, queueDepthSlider, outputScaleSlider, sharpnessSlider, dynamicMinSlider, dynamicMaxSlider, targetFPSSlider].forEach {
@@ -356,8 +715,8 @@ final class ControlPanelView: NSView {
         refreshSourcesButton.target = self
         refreshSourcesButton.action = #selector(handleRefreshSources)
 
-        captureCursorCheckbox.target = self
-        captureCursorCheckbox.action = #selector(handleCursorCaptureChanged)
+        captureCursorSwitch.target = self
+        captureCursorSwitch.action = #selector(handleCursorCaptureChanged)
 
         captureFPSSlider.target = self
         captureFPSSlider.action = #selector(handleCaptureFPSChanged)
@@ -368,14 +727,14 @@ final class ControlPanelView: NSView {
         outputScaleSlider.target = self
         outputScaleSlider.action = #selector(handleOutputScaleChanged)
 
-        matchOutputResolutionCheckbox.target = self
-        matchOutputResolutionCheckbox.action = #selector(handleMatchOutputResolutionChanged)
+        matchOutputResolutionSwitch.target = self
+        matchOutputResolutionSwitch.action = #selector(handleMatchOutputResolutionChanged)
 
         sharpnessSlider.target = self
         sharpnessSlider.action = #selector(handleSharpnessChanged)
 
-        dynamicResolutionCheckbox.target = self
-        dynamicResolutionCheckbox.action = #selector(handleDynamicResolutionChanged)
+        dynamicResolutionSwitch.target = self
+        dynamicResolutionSwitch.action = #selector(handleDynamicResolutionChanged)
 
         dynamicMinSlider.target = self
         dynamicMinSlider.action = #selector(handleDynamicMinChanged)
@@ -386,16 +745,31 @@ final class ControlPanelView: NSView {
         targetFPSSlider.target = self
         targetFPSSlider.action = #selector(handleTargetFPSChanged)
 
-        frameGenerationCheckbox.target = self
-        frameGenerationCheckbox.action = #selector(handleFrameGenerationEnabledChanged)
+        frameGenerationSwitch.action = #selector(handleFrameGenerationEnabledChanged)
 
-        presetSegmented.selectedSegment = ControlPreset.balanced.rawValue
-        presetSegmented.target = self
-        presetSegmented.action = #selector(handlePresetChanged)
-        presetSegmented.controlSize = .regular
-        presetSegmented.setWidth(104, forSegment: 0)
-        presetSegmented.setWidth(104, forSegment: 1)
-        presetSegmented.setWidth(104, forSegment: 2)
+        addProfileButton.target = self
+        addProfileButton.action = #selector(handleAddProfile)
+        
+        duplicateProfileButton.target = self
+        duplicateProfileButton.action = #selector(handleDuplicateProfile)
+        
+        renameProfileButton.target = self
+        renameProfileButton.action = #selector(handleRenameProfile)
+        
+        deleteProfileButton.target = self
+        deleteProfileButton.action = #selector(handleDeleteProfile)
+
+
+        advancedToggleButton.bezelStyle = .inline
+        advancedToggleButton.isBordered = false
+        advancedToggleButton.contentTintColor = UITheme.muted
+        
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+        advancedToggleButton.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Show")?.withSymbolConfiguration(config)
+        advancedToggleButton.imagePosition = .imageOnly
+        
+        advancedToggleButton.target = self
+        advancedToggleButton.action = #selector(handleAdvancedToggle)
     }
 
     private func layoutUI() {
@@ -408,7 +782,7 @@ final class ControlPanelView: NSView {
         body.orientation = .horizontal
         body.alignment = .top
         body.distribution = .fill
-        body.spacing = 14
+        body.spacing = 20
 
         addSubview(topBar)
         addSubview(body)
@@ -433,9 +807,8 @@ final class ControlPanelView: NSView {
         container.blendingMode = .withinWindow
         container.state = .active
         container.wantsLayer = true
-        container.layer?.cornerRadius = 13
-        container.layer?.borderWidth = 1
-        container.layer?.borderColor = UITheme.cardBorder.cgColor
+        container.layer?.cornerRadius = 12
+        container.layer?.borderWidth = 0
 
         let titleBlock = NSStackView(views: [appNameLabel, appSubtitleLabel])
         titleBlock.orientation = .vertical
@@ -466,76 +839,233 @@ final class ControlPanelView: NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
-        container.layer?.cornerRadius = 14
-        container.layer?.borderWidth = 1
-        container.layer?.borderColor = UITheme.cardBorder.cgColor
+        container.layer?.cornerRadius = 12
+        container.layer?.borderWidth = 0
         container.layer?.backgroundColor = UITheme.sidebar.cgColor
 
-        let title = NSTextField(labelWithString: "Game Profiles")
-        title.font = NSFont.systemFont(ofSize: 30, weight: .bold)
+        // 1. Profiles title — pinned to top
+        let title = NSTextField(labelWithString: "Profiles")
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
         title.textColor = UITheme.title
 
-        let selectedProfile = NSTextField(labelWithString: "Default")
-        selectedProfile.font = NSFont.systemFont(ofSize: 16, weight: .semibold)
-        selectedProfile.textColor = UITheme.title
-
-        let selectedCapsule = NSView()
-        selectedCapsule.translatesAutoresizingMaskIntoConstraints = false
-        selectedCapsule.wantsLayer = true
-        selectedCapsule.layer?.cornerRadius = 9
-        selectedCapsule.layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.25).cgColor
-        selectedCapsule.layer?.borderWidth = 1
-        selectedCapsule.layer?.borderColor = UITheme.accent.withAlphaComponent(0.7).cgColor
-        selectedCapsule.addSubview(selectedProfile)
-        selectedProfile.translatesAutoresizingMaskIntoConstraints = false
-
-        NSLayoutConstraint.activate([
-            selectedProfile.leadingAnchor.constraint(equalTo: selectedCapsule.leadingAnchor, constant: 12),
-            selectedProfile.trailingAnchor.constraint(equalTo: selectedCapsule.trailingAnchor, constant: -12),
-            selectedProfile.topAnchor.constraint(equalTo: selectedCapsule.topAnchor, constant: 8),
-            selectedProfile.bottomAnchor.constraint(equalTo: selectedCapsule.bottomAnchor, constant: -8)
+        // 2. Action buttons — pinned directly under title
+        let actionsContainer = NSStackView(views: [
+            setupSidebarButton(addProfileButton, symbol: "plus"),
+            setupSidebarButton(duplicateProfileButton, symbol: "plus.square.on.square"),
+            setupSidebarButton(renameProfileButton, symbol: "pencil"),
+            setupSidebarButton(deleteProfileButton, symbol: "trash")
         ])
+        actionsContainer.translatesAutoresizingMaskIntoConstraints = false
+        actionsContainer.orientation = .horizontal
+        actionsContainer.spacing = 8
 
-        let addButton = makeSecondaryButton(title: "+")
-        let editButton = makeSecondaryButton(title: "Edit")
-        let deleteButton = makeSecondaryButton(title: "Delete")
-        addButton.isEnabled = false
-        editButton.isEnabled = false
-        deleteButton.isEnabled = false
+        // Header block: title + buttons, fixed at top
+        let headerStack = NSStackView(views: [title, actionsContainer])
+        headerStack.translatesAutoresizingMaskIntoConstraints = false
+        headerStack.orientation = .vertical
+        headerStack.alignment = .leading
+        headerStack.spacing = 14
+        headerStack.setContentHuggingPriority(.required, for: .vertical)
 
-        let actionRow = NSStackView(views: [addButton, editButton, deleteButton])
-        actionRow.orientation = .horizontal
-        actionRow.spacing = 8
+        let headerDivider = NSView()
+        headerDivider.translatesAutoresizingMaskIntoConstraints = false
+        headerDivider.wantsLayer = true
+        headerDivider.layer?.backgroundColor = UITheme.cardBorder.withAlphaComponent(0.4).cgColor
+        headerDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
-        let manual = NSTextField(labelWithString: "Manual")
-        manual.font = NSFont.systemFont(ofSize: 14, weight: .medium)
-        manual.textColor = UITheme.muted
 
-        let settings = NSTextField(labelWithString: "Settings")
-        settings.font = NSFont.systemFont(ofSize: 14, weight: .medium)
-        settings.textColor = UITheme.muted
+        // 3. Profiles list — inside a scroll view that fills remaining space
+        profileListStack.orientation = .vertical
+        profileListStack.alignment = .leading
+        profileListStack.spacing = 4
+        profileListStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let spacer = NSView()
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = profileListStack
 
-        let stack = NSStackView(views: [title, selectedCapsule, actionRow, spacer, manual, settings])
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 12
+        // 4. Footer items
+        let divider = NSView()
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        divider.wantsLayer = true
+        divider.layer?.backgroundColor = UITheme.cardBorder.withAlphaComponent(0.4).cgColor
+        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
 
-        container.addSubview(stack)
+        let settingsButton = SidebarIconButton()
+        settingsButton.drawsBackground = false
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        
+        let gearConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+        let gearIcon = NSImageView()
+        gearIcon.image = NSImage(systemSymbolName: "gearshape.fill", accessibilityDescription: "Settings")?.withSymbolConfiguration(gearConfig)
+        gearIcon.contentTintColor = UITheme.body
+        gearIcon.translatesAutoresizingMaskIntoConstraints = false
+        
+        let settingsLabel = NSTextField(labelWithString: "Settings")
+        settingsLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        settingsLabel.textColor = UITheme.body
+        
+        let contentStack = NSStackView(views: [gearIcon, settingsLabel])
+        contentStack.orientation = .horizontal
+        contentStack.spacing = 8
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        
+        settingsButton.addSubview(contentStack)
+        let leadingConstraint = contentStack.leadingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: 12)
+        leadingConstraint.isActive = true
+        contentStack.centerYAnchor.constraint(equalTo: settingsButton.centerYAnchor).isActive = true
+        
+        settingsButton.onHover = { [weak settingsButton, weak contentStack, weak leadingConstraint] hovered in
+            guard let _ = settingsButton, let stack = contentStack, let constraint = leadingConstraint else { return }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.3
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                
+                if hovered {
+                    // Center it: (ButtonWidth - ContentWidth) / 2
+                    // Button is 140 wide, content is ~80 wide.
+                    let buttonWidth: CGFloat = 140
+                    let contentWidth = stack.fittingSize.width
+                    constraint.animator().constant = (buttonWidth - contentWidth) / 2
+                    settingsLabel.animator().textColor = UITheme.title
+                    gearIcon.animator().contentTintColor = UITheme.title
+                } else {
+                    constraint.animator().constant = 12
+                    settingsLabel.animator().textColor = UITheme.body
+                    gearIcon.animator().contentTintColor = UITheme.body
+                }
+            }
+        }
+        
+        settingsButton.target = self
+        settingsButton.action = #selector(handleSettingsTapped)
+
+        let settingsStack = NSStackView(views: [settingsButton])
+        settingsStack.translatesAutoresizingMaskIntoConstraints = false
+        settingsStack.orientation = .horizontal
+        settingsStack.spacing = 0
+        settingsStack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+
+
+
+
+        let footerStack = NSStackView(views: [divider, settingsStack])
+        footerStack.translatesAutoresizingMaskIntoConstraints = false
+        footerStack.orientation = .vertical
+        footerStack.alignment = .leading
+        footerStack.spacing = 10
+        footerStack.setContentHuggingPriority(.required, for: .vertical)
+
+        container.addSubview(headerStack)
+        container.addSubview(headerDivider)
+        container.addSubview(scrollView)
+        container.addSubview(footerStack)
+
+
 
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 280),
+            container.widthAnchor.constraint(equalToConstant: 240),
 
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -14)
+            // Header: pinned to top
+            headerStack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            headerStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            headerStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+
+            // Header Divider
+            headerDivider.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 14),
+            headerDivider.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            headerDivider.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+
+            // ScrollView: fills between header and footer
+            scrollView.topAnchor.constraint(equalTo: headerDivider.bottomAnchor, constant: 8),
+
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            scrollView.bottomAnchor.constraint(equalTo: footerStack.topAnchor, constant: -16),
+
+            // Footer: pinned to bottom
+            footerStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
+            footerStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
+            footerStack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
+
+            divider.widthAnchor.constraint(equalTo: footerStack.widthAnchor),
+            settingsStack.widthAnchor.constraint(equalTo: footerStack.widthAnchor),
+            settingsButton.heightAnchor.constraint(equalToConstant: 40),
+            settingsButton.widthAnchor.constraint(equalToConstant: 140),
+
+
+
+            // Profile list fills scroll view width
+            profileListStack.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -8)
         ])
 
         return container
     }
+
+    private func setupSidebarButton(_ button: SidebarIconButton, symbol: String) -> NSButton {
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        button.imagePosition = .imageOnly
+
+
+
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        return button
+    }
+
+    func setProfiles(_ profiles: [Profile], activeId: UUID) {
+        self.activeProfileId = activeId
+        profileListStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        
+        for profile in profiles {
+            let isActive = (profile.id == activeId)
+            let btn = ProfileButton(profile: profile, isActive: isActive)
+            btn.target = self
+            btn.action = #selector(handleProfileSelected(_:))
+            profileListStack.addArrangedSubview(btn)
+            btn.leadingAnchor.constraint(equalTo: profileListStack.leadingAnchor).isActive = true
+            btn.trailingAnchor.constraint(equalTo: profileListStack.trailingAnchor).isActive = true
+        }
+        
+        let activeProfile = profiles.first(where: { $0.id == activeId })
+        duplicateProfileButton.isEnabled = true
+        renameProfileButton.isEnabled = activeProfile?.isBuiltIn == false
+        deleteProfileButton.isEnabled = activeProfile?.isBuiltIn == false
+    }
+
+    @objc private func handleProfileSelected(_ sender: ProfileButton) {
+        delegate?.controlPanel(self, didSelectProfile: sender.profileId)
+    }
+
+    @objc private func handleAddProfile() {
+        delegate?.controlPanelDidRequestAddProfile(self)
+    }
+
+    @objc private func handleDuplicateProfile() {
+        guard let id = activeProfileId else { return }
+        delegate?.controlPanel(self, didRequestDuplicateProfile: id)
+    }
+
+    @objc private func handleRenameProfile() {
+        guard let id = activeProfileId else { return }
+        delegate?.controlPanel(self, didRequestRenameProfile: id)
+    }
+
+    @objc private func handleDeleteProfile() {
+        guard let id = activeProfileId else { return }
+        delegate?.controlPanel(self, didRequestDeleteProfile: id)
+    }
+
+    @objc private func handleSettingsTapped() {
+        delegate?.controlPanelDidRequestSettings(self)
+    }
+
 
     private func makeMainContent() -> NSView {
         let scrollView = NSScrollView()
@@ -556,28 +1086,26 @@ final class ControlPanelView: NSView {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.distribution = .fill
-        stack.spacing = 12
+        stack.spacing = 14
 
         stack.addArrangedSubview(profileTitleLabel)
 
         let sessionCard = makeSessionCard()
         stack.addArrangedSubview(sessionCard)
-        sessionCard.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
 
-        let fgScalingRow = makeCardRow(left: makeFrameGenerationCard(), right: makeScalingCard())
-        stack.addArrangedSubview(fgScalingRow)
-        fgScalingRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        let captureCard = makeCaptureCard()
+        let scalingCard = makeScalingCard()
+        let row1 = makeCardRow(left: captureCard, right: scalingCard)
+        stack.addArrangedSubview(row1)
 
-        let captureRenderingRow = makeCardRow(left: makeCaptureCard(), right: makeRenderingCard())
-        stack.addArrangedSubview(captureRenderingRow)
-        captureRenderingRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-
-        let presetsCard = makePresetsCard()
-        stack.addArrangedSubview(presetsCard)
-        presetsCard.widthAnchor.constraint(equalTo: stack.widthAnchor, multiplier: 0.52).isActive = true
+        let frameGenerationCard = makeFrameGenerationCard()
+        let renderingCard = makeRenderingCard()
+        let row2 = makeCardRow(left: frameGenerationCard, right: renderingCard)
+        stack.addArrangedSubview(row2)
 
         contentView.addSubview(stack)
 
+        // Pin stack to fill scroll content with explicit leading + trailing
         NSLayoutConstraint.activate([
             contentView.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: clipView.trailingAnchor),
@@ -588,7 +1116,15 @@ final class ControlPanelView: NSView {
             stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
             stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8)
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
+
+            // Pin each child to fill the stack width
+            sessionCard.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            sessionCard.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            row1.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            row1.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            row2.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            row2.trailingAnchor.constraint(equalTo: stack.trailingAnchor)
         ])
 
         return scrollView
@@ -597,78 +1133,142 @@ final class ControlPanelView: NSView {
     private func makeSessionCard() -> NSView {
         let card = CardView(title: "Session")
 
-        sessionStateTag.setContentHuggingPriority(.required, for: .vertical)
         statusLabel.setContentHuggingPriority(.required, for: .vertical)
+        statusLabel.alignment = .left
+        statsLabel.alignment = .left
 
-        card.contentStack.addArrangedSubview(sessionStateTag)
-        card.contentStack.addArrangedSubview(statusLabel)
+        // Fixed container: dot pinned to leading, label follows
+        let statusContainer = NSView()
+        statusContainer.translatesAutoresizingMaskIntoConstraints = false
+        statusContainer.addSubview(statusDot)
+        statusContainer.addSubview(statusLabel)
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            statusDot.leadingAnchor.constraint(equalTo: statusContainer.leadingAnchor),
+            statusDot.centerYAnchor.constraint(equalTo: statusContainer.centerYAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: statusDot.trailingAnchor, constant: 8),
+            statusLabel.topAnchor.constraint(equalTo: statusContainer.topAnchor),
+            statusLabel.bottomAnchor.constraint(equalTo: statusContainer.bottomAnchor),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: statusContainer.trailingAnchor),
+            statusContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 28)
+        ])
+
+        card.contentStack.addArrangedSubview(statusContainer)
         card.contentStack.addArrangedSubview(statsLabel)
 
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 168).isActive = true
+        // Stretch items to fill card width
+        statusContainer.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
+        statusContainer.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
+        statsLabel.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
+        statsLabel.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
+
+        card.setContentHuggingPriority(.required, for: .vertical)
+        card.heightAnchor.constraint(equalToConstant: 120).isActive = true
 
         return card
     }
 
     private func makeFrameGenerationCard() -> NSView {
-        let card = CardView(title: "Frame Generation")
+        let card = CardView(title: "Frame Generation", iconName: "film")
 
-        card.contentStack.addArrangedSubview(frameGenerationCheckbox)
-        card.contentStack.addArrangedSubview(makeLabeledControlRow(label: "Mode", control: frameGenerationModePopup))
-        card.contentStack.addArrangedSubview(makeFootnote(text: "Interpolation is optimized for 30->60 and 30->90. True motion/depth vectors still improve hard scenes."))
+        let enabledRow = makeLabeledControlRow(label: "Enabled", control: frameGenerationSwitch, info: "Generates intermediate frames to raise output FPS; best at 30→60/90.")
+        let modeRow = makeLabeledControlRow(label: "Mode", control: frameGenerationModeDropdown, info: "Sets the frame generation multiplier.")
 
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 176).isActive = true
+        card.contentStack.addArrangedSubview(enabledRow)
+        card.contentStack.addArrangedSubview(modeRow)
+
+        // Pin rows to fill card width
+        for row in [enabledRow, modeRow] {
+            row.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
+        }
+
+        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
 
         return card
     }
 
     private func makeScalingCard() -> NSView {
-        let card = CardView(title: "Scaling")
+        let card = CardView(title: "Scaling", iconName: "plus.viewfinder")
 
-        card.contentStack.addArrangedSubview(makeLabeledControlRow(label: "Type", control: upscalerPopup))
-        card.contentStack.addArrangedSubview(makeSliderRow(label: "Factor", slider: outputScaleSlider, valueLabel: outputScaleValueLabel))
-        card.contentStack.addArrangedSubview(matchOutputResolutionCheckbox)
-        card.contentStack.addArrangedSubview(makeLabeledControlRow(label: "Sampling", control: samplingPopup))
-        card.contentStack.addArrangedSubview(makeSliderRow(label: "Sharpness", slider: sharpnessSlider, valueLabel: sharpnessValueLabel))
+        let typeRow = makeLabeledControlRow(label: "Type", control: upscalerDropdown, info: "Choose the upscaler implementation.")
+        let factorRow = makeSliderRow(label: "Factor", slider: outputScaleSlider, valueLabel: outputScaleValueLabel)
+        let matchRow = makeLabeledControlRow(label: "Match Resolution", control: matchOutputResolutionSwitch, info: "Resize source before scaling to match output.")
+        let samplingRow = makeLabeledControlRow(label: "Sampling", control: samplingDropdown, info: "Resampling filter used during scaling.")
+        let sharpRow = makeSliderRow(label: "Sharpness", slider: sharpnessSlider, valueLabel: sharpnessValueLabel, info: "Post-sharpening intensity.")
 
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 176).isActive = true
+        let rows: [NSView] = [typeRow, factorRow, matchRow, samplingRow, sharpRow]
+        for row in rows {
+            card.contentStack.addArrangedSubview(row)
+            row.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
+        }
+
+        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
         return card
     }
 
     private func makeCaptureCard() -> NSView {
-        let card = CardView(title: "Capture")
+        let card = CardView(title: "Capture", iconName: "display")
 
-        card.contentStack.addArrangedSubview(makeLabeledControlRow(label: "Mode", control: captureModePopup))
-        card.contentStack.addArrangedSubview(makeSourcePickerRow())
-        card.contentStack.addArrangedSubview(captureCursorCheckbox)
-        card.contentStack.addArrangedSubview(makeSliderRow(label: "Capture FPS", slider: captureFPSSlider, valueLabel: captureFPSValueLabel))
-        card.contentStack.addArrangedSubview(makeSliderRow(label: "Queue Depth", slider: queueDepthSlider, valueLabel: queueDepthValueLabel))
+        let modeRow = makeLabeledControlRow(label: "Mode", control: captureModeDropdown, info: "Select automatic, display, or window source.")
+        let sourceRow = makeSourcePickerRow()
+        let cursorRow = makeLabeledControlRow(label: "Show Cursor", control: captureCursorSwitch)
+        let fpsRow = makeSliderRow(label: "Capture FPS", slider: captureFPSSlider, valueLabel: captureFPSValueLabel, info: "Capture cadence from the source.")
+        let depthRow = makeSliderRow(label: "Queue Depth", slider: queueDepthSlider, valueLabel: queueDepthValueLabel, info: "Buffered frames to balance latency and stability.")
 
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 198).isActive = true
+        let rows: [NSView] = [modeRow, sourceRow, cursorRow, fpsRow, depthRow]
+        for row in rows {
+            card.contentStack.addArrangedSubview(row)
+            row.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
+        }
+
+        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
         return card
     }
 
     private func makeRenderingCard() -> NSView {
-        let card = CardView(title: "Rendering")
+        let card = CardView(title: "Rendering", iconName: "gearshape", headerAccessory: advancedToggleButton)
 
-        card.contentStack.addArrangedSubview(dynamicResolutionCheckbox)
-        card.contentStack.addArrangedSubview(makeSliderRow(label: "Minimum Scale", slider: dynamicMinSlider, valueLabel: dynamicMinValueLabel))
-        card.contentStack.addArrangedSubview(makeSliderRow(label: "Maximum Scale", slider: dynamicMaxSlider, valueLabel: dynamicMaxValueLabel))
-        card.contentStack.addArrangedSubview(makeSliderRow(label: "Target FPS", slider: targetFPSSlider, valueLabel: targetFPSValueLabel))
+        advancedContentStack.translatesAutoresizingMaskIntoConstraints = false
+        advancedContentStack.orientation = .vertical
+        advancedContentStack.alignment = .leading
+        advancedContentStack.spacing = 10
+        advancedContentStack.isHidden = !isAdvancedVisible
 
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 198).isActive = true
+        // Rendering Controls
+        let dynRow = makeLabeledControlRow(label: "Dynamic Resolution", control: dynamicResolutionSwitch)
+        let minRow = makeSliderRow(label: "Min Scale", slider: dynamicMinSlider, valueLabel: dynamicMinValueLabel)
+        let maxRow = makeSliderRow(label: "Max Scale", slider: dynamicMaxSlider, valueLabel: dynamicMaxValueLabel)
+        let fpsRow = makeSliderRow(label: "Target FPS", slider: targetFPSSlider, valueLabel: targetFPSValueLabel)
+
+        advancedContentStack.addArrangedSubview(dynRow)
+        advancedContentStack.addArrangedSubview(minRow)
+        advancedContentStack.addArrangedSubview(maxRow)
+        advancedContentStack.addArrangedSubview(fpsRow)
+        
+        card.contentStack.addArrangedSubview(advancedContentStack)
+
+        // Pin advanced content to fill card width via leading+trailing
+        advancedContentStack.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
+        advancedContentStack.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
+        // Pin each row inside advanced to fill
+        for row in [dynRow, minRow, maxRow, fpsRow] {
+            row.leadingAnchor.constraint(equalTo: advancedContentStack.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: advancedContentStack.trailingAnchor).isActive = true
+        }
+        
+        
+        // Match Frame Generation card minimum height so they align on first launch
+        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        card.setContentHuggingPriority(.defaultHigh, for: .vertical)
 
         return card
     }
-
-    private func makePresetsCard() -> NSView {
-        let card = CardView(title: "Presets")
-        card.contentStack.addArrangedSubview(presetSegmented)
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
-        return card
-    }
-
+    
     private func makeCardRow(left: NSView, right: NSView) -> NSView {
         left.translatesAutoresizingMaskIntoConstraints = false
         right.translatesAutoresizingMaskIntoConstraints = false
@@ -678,18 +1278,30 @@ final class ControlPanelView: NSView {
         row.orientation = .horizontal
         row.distribution = .fillEqually
         row.alignment = .top
-        row.spacing = 12
+        row.spacing = 16
+
+        // Keep both cards same height so one doesn't vanish when the other expands
+        left.heightAnchor.constraint(equalTo: right.heightAnchor).isActive = true
 
         return row
     }
 
-    private func makeLabeledControlRow(label: String, control: NSView) -> NSView {
+    private func makeLabeledControlRow(label: String, control: NSView, info: String? = nil) -> NSView {
         let text = NSTextField(labelWithString: label)
-        text.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        text.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         text.textColor = UITheme.body
         text.setContentHuggingPriority(.required, for: .horizontal)
 
-        let row = NSStackView(views: [text, control])
+        let titleStack = NSStackView(views: [text])
+        titleStack.orientation = .horizontal
+        titleStack.alignment = .centerY
+        titleStack.spacing = 6
+        if let info {
+            titleStack.addArrangedSubview(makeInfoIcon(title: label, tooltip: info))
+        }
+
+        let row = NSStackView(views: [titleStack, control])
+        row.translatesAutoresizingMaskIntoConstraints = false
         row.orientation = .horizontal
         row.alignment = .centerY
         row.distribution = .fill
@@ -697,31 +1309,50 @@ final class ControlPanelView: NSView {
         return row
     }
 
-    private func makeSliderRow(label: String, slider: NSSlider, valueLabel: NSTextField) -> NSView {
+    private func makeSliderRow(label: String, slider: NSSlider, valueLabel: NSTextField, info: String? = nil) -> NSView {
         let title = NSTextField(labelWithString: label)
-        title.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        title.font = NSFont.systemFont(ofSize: 12, weight: .medium)
         title.textColor = UITheme.body
 
-        valueLabel.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .semibold)
+        valueLabel.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .semibold)
         valueLabel.textColor = UITheme.title
         valueLabel.alignment = .right
         valueLabel.setContentHuggingPriority(.required, for: .horizontal)
 
-        let rowHeader = NSStackView(views: [title, valueLabel])
+        let titleStack = NSStackView(views: [title])
+        titleStack.orientation = .horizontal
+        titleStack.alignment = .centerY
+        titleStack.spacing = 6
+        if let info {
+            titleStack.addArrangedSubview(makeInfoIcon(title: label, tooltip: info))
+        }
+
+        let rowHeader = NSStackView(views: [titleStack, valueLabel])
+        rowHeader.translatesAutoresizingMaskIntoConstraints = false
         rowHeader.orientation = .horizontal
         rowHeader.alignment = .centerY
+        rowHeader.distribution = .fill
         rowHeader.spacing = 8
 
+        slider.translatesAutoresizingMaskIntoConstraints = false
+
         let row = NSStackView(views: [rowHeader, slider])
+        row.translatesAutoresizingMaskIntoConstraints = false
         row.orientation = .vertical
         row.spacing = 3
         row.alignment = .leading
+
+        // Pin header and slider to fill row width via leading+trailing
+        rowHeader.leadingAnchor.constraint(equalTo: row.leadingAnchor).isActive = true
+        rowHeader.trailingAnchor.constraint(equalTo: row.trailingAnchor).isActive = true
+        slider.leadingAnchor.constraint(equalTo: row.leadingAnchor).isActive = true
+        slider.trailingAnchor.constraint(equalTo: row.trailingAnchor).isActive = true
 
         return row
     }
 
     private func makeSourcePickerRow() -> NSView {
-        let row = NSStackView(views: [captureSourcePopup, refreshSourcesButton])
+        let row = NSStackView(views: [captureSourceDropdown, refreshSourcesButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
@@ -729,23 +1360,34 @@ final class ControlPanelView: NSView {
         return row
     }
 
-    private func makeFootnote(text: String) -> NSView {
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = NSFont.systemFont(ofSize: 12, weight: .regular)
-        label.textColor = UITheme.muted
-        return label
+    private func makeInfoIcon(title: String, tooltip: String) -> NSView {
+        let icon = HoverInfoIcon(tooltip: tooltip)
+        return icon
     }
 
     private func makeSecondaryButton(title: String) -> NSButton {
         let button = NSButton(title: title, target: nil, action: nil)
         button.bezelStyle = .rounded
-        button.bezelColor = NSColor(calibratedRed: 0.30, green: 0.35, blue: 0.44, alpha: 1.0)
+        button.bezelColor = NSColor(calibratedRed: 0.24, green: 0.25, blue: 0.30, alpha: 1.0)
         button.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         return button
     }
 
+    private func makeSecondaryIconButton(symbolName: String) -> NSButton {
+        let button = NSButton()
+        button.bezelStyle = .rounded
+        button.bezelColor = NSColor(calibratedRed: 0.24, green: 0.25, blue: 0.30, alpha: 1.0)
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: symbolName)
+        button.imagePosition = .imageOnly
+        button.contentTintColor = UITheme.body
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        return button
+    }
+
     private func syncDynamicControlsEnabledState() {
-        let enabled = dynamicResolutionCheckbox.state == .on
+        let enabled = dynamicResolutionSwitch.state == .on
         dynamicMinSlider.isEnabled = enabled
         dynamicMaxSlider.isEnabled = enabled
     }
@@ -765,29 +1407,13 @@ final class ControlPanelView: NSView {
         delegate?.controlPanelDidRequestRefreshSources(self)
     }
 
-    @objc
-    private func handleCaptureModeChanged() {
-        guard !isApplyingValues,
-              let mode = CaptureModeChoice(rawValue: captureModePopup.indexOfSelectedItem) else {
-            return
-        }
-        delegate?.controlPanel(self, didSelectCaptureMode: mode)
-    }
-
-    @objc
-    private func handleCaptureSourceChanged() {
-        guard !isApplyingValues else {
-            return
-        }
-        delegate?.controlPanel(self, didSelectCaptureSourceAt: captureSourcePopup.indexOfSelectedItem)
-    }
 
     @objc
     private func handleCursorCaptureChanged() {
         guard !isApplyingValues else {
             return
         }
-        delegate?.controlPanel(self, didToggleCursor: captureCursorCheckbox.state == .on)
+        delegate?.controlPanel(self, didToggleCursor: captureCursorSwitch.state == .on)
     }
 
     @objc
@@ -810,15 +1436,6 @@ final class ControlPanelView: NSView {
         delegate?.controlPanel(self, didChangeQueueDepth: value)
     }
 
-    @objc
-    private func handleUpscalerChanged() {
-        guard !isApplyingValues,
-              let title = upscalerPopup.selectedItem?.title,
-              let value = UpscalingAlgorithm(rawValue: title) else {
-            return
-        }
-        delegate?.controlPanel(self, didChangeUpscalingAlgorithm: value)
-    }
 
     @objc
     private func handleOutputScaleChanged() {
@@ -835,17 +1452,7 @@ final class ControlPanelView: NSView {
         guard !isApplyingValues else {
             return
         }
-        delegate?.controlPanel(self, didToggleMatchOutputResolution: matchOutputResolutionCheckbox.state == .on)
-    }
-
-    @objc
-    private func handleSamplingChanged() {
-        guard !isApplyingValues,
-              let title = samplingPopup.selectedItem?.title,
-              let value = SamplingMode(rawValue: title) else {
-            return
-        }
-        delegate?.controlPanel(self, didChangeSamplingMode: value)
+        delegate?.controlPanel(self, didToggleMatchOutputResolution: matchOutputResolutionSwitch.state == .on)
     }
 
     @objc
@@ -864,7 +1471,7 @@ final class ControlPanelView: NSView {
             return
         }
         syncDynamicControlsEnabledState()
-        delegate?.controlPanel(self, didToggleDynamicResolution: dynamicResolutionCheckbox.state == .on)
+        delegate?.controlPanel(self, didToggleDynamicResolution: dynamicResolutionSwitch.state == .on)
     }
 
     @objc
@@ -904,26 +1511,131 @@ final class ControlPanelView: NSView {
         guard !isApplyingValues else {
             return
         }
-        delegate?.controlPanel(self, didToggleFrameGeneration: frameGenerationCheckbox.state == .on)
+        delegate?.controlPanel(self, didToggleFrameGeneration: frameGenerationSwitch.state == .on)
     }
 
     @objc
-    private func handleFrameGenerationModeChanged() {
-        guard !isApplyingValues,
-              let title = frameGenerationModePopup.selectedItem?.title,
-              let mode = FrameGenerationMode(rawValue: title) else {
-            return
+    private func handleAdvancedToggle() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.25
+            context.allowsImplicitAnimation = true
+            
+            isAdvancedVisible.toggle()
+            advancedContentStack.isHidden = !isAdvancedVisible
+            
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+            let symbolName = isAdvancedVisible ? "chevron.down" : "chevron.right"
+            advancedToggleButton.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: isAdvancedVisible ? "Hide" : "Show")?.withSymbolConfiguration(config)
+            advancedToggleButton.contentTintColor = isAdvancedVisible ? UITheme.accent : UITheme.muted
+            
+            self.window?.layoutIfNeeded()
+            self.layoutSubtreeIfNeeded()
         }
-        delegate?.controlPanel(self, didChangeFrameGenerationMode: mode)
+    }
+}
+
+private final class HoverInfoIcon: NSView {
+    private let tooltipText: String
+    private var popover: NSPopover?
+    private var hoverTimer: Timer?
+    private var trackingArea: NSTrackingArea?
+
+    init(tooltip: String) {
+        self.tooltipText = tooltip
+        super.init(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 16).isActive = true
+        heightAnchor.constraint(equalToConstant: 16).isActive = true
+        setContentHuggingPriority(.required, for: .horizontal)
     }
 
-    @objc
-    private func handlePresetChanged() {
-        guard !isApplyingValues,
-              let preset = ControlPreset(rawValue: presetSegmented.selectedSegment) else {
-            return
-        }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
-        delegate?.controlPanel(self, didSelectPreset: preset)
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: UITheme.muted
+        ]
+        let str = NSAttributedString(string: "ⓘ", attributes: attributes)
+        let size = str.size()
+        let point = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
+        str.draw(at: point)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hoverTimer?.invalidate()
+        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.showTooltip()
+            }
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        hideTooltip()
+    }
+
+    private func showTooltip() {
+        guard popover == nil else { return }
+
+        let pop = NSPopover()
+        pop.behavior = .semitransient
+        pop.animates = true
+
+        let vc = NSViewController()
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor(calibratedRed: 0.14, green: 0.15, blue: 0.18, alpha: 1.0).cgColor
+        container.layer?.cornerRadius = 7
+
+        let label = NSTextField(labelWithString: tooltipText)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        label.textColor = NSColor(white: 0.92, alpha: 1.0)
+        label.cell?.wraps = true
+        label.preferredMaxLayoutWidth = 250
+        label.lineBreakMode = .byWordWrapping
+
+        container.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8)
+        ])
+
+        vc.view = container
+        pop.contentViewController = vc
+        pop.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
+        popover = pop
+    }
+
+    private func hideTooltip() {
+        popover?.performClose(nil)
+        popover = nil
     }
 }

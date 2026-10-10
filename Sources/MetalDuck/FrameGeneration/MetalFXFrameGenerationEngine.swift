@@ -22,457 +22,262 @@ enum FrameGenerationError: Error {
     case flowTextureCreationFailed
     case unsupportedDevice
     case incompatibleTextures
+    case missingFlow
 }
 
-private struct InterpolationUniforms {
-    var blendFactor: Float
-    var invOutputSize: SIMD2<Float>
-    var globalMotionUV: SIMD2<Float>
-    var flowInfluence: Float
+// MARK: - Shader param structs (must match Present.metal)
+
+private struct FlowWarpParams {
+    var scale: Float
 }
 
-private struct FlowUniforms {
-    var imageSize: SIMD2<UInt32>
-    var flowSize: SIMD2<UInt32>
-    var blockSize: UInt32
-    var searchRadius: UInt32
-    var sampleStep: UInt32
-    var searchStep: UInt32
+private struct FlowComposeParams {
+    var t: Float
+    var errorThreshold: Float
+    var flowThreshold: Float
 }
 
+private struct FlowOcclusionParams {
+    var threshold: Float
+}
+
+// MARK: - Frame Generation Engine
+
+/// Core engine for generating interpolated frames using motion-compensated warping.
+/// Orchestrates occlusion detection, flow warping, and frame composition shaders.
 final class MetalFXFrameGenerationEngine {
-    private static let flowBlockSize: Int = 8
-
     private let device: MTLDevice
-    private let interpolationPipelineState: MTLRenderPipelineState?
-    private let flowPipelineState: MTLComputePipelineState?
-    private let colorSampler: MTLSamplerState?
-    private let flowSampler: MTLSamplerState?
 
-    private var outputTexture: MTLTexture?
-    private var flowTexture: MTLTexture?
+    // GPU pipelines for frame generation
+    private let flowWarpPipeline: MTLComputePipelineState?
+    private let flowOcclusionPipeline: MTLComputePipelineState?
+    private let flowComposePipeline: MTLComputePipelineState?
 
-    init(device: MTLDevice) {
+    // Scratch textures for interpolation
+    private var occlusionTexture: MTLTexture?
+    private var warpedPrevTexture: MTLTexture?
+    private var warpedNextTexture: MTLTexture?
+    private var preGeneratedFrame: MTLTexture?
+
+    private let flowOcclusionThreshold: Float = 1.5
+
+    // Vision flow provider (async, runs on ANE)
+    let visionFlowProvider: VisionFlowProvider
+    private var flowFrameCounter: UInt64 = 0
+
+    // Track the previous frame for flow & interpolation
+    private var previousFrameTexture: MTLTexture?
+    private var hasPendingInterpolatedFrame = false
+
+    init(device: MTLDevice, commandQueue: MTLCommandQueue, library: MTLLibrary?) {
         self.device = device
-        let resources = Self.buildResources(device: device)
-        self.interpolationPipelineState = resources.interpolationPipelineState
-        self.flowPipelineState = resources.flowPipelineState
-        self.colorSampler = resources.colorSampler
-        self.flowSampler = resources.flowSampler
+        self.visionFlowProvider = VisionFlowProvider(device: device, commandQueue: commandQueue)
+
+        // Load compute pipelines from the provided library
+        guard let library = library else {
+            NSLog("MetalFXFrameGenerationEngine: No MTLLibrary provided — frame generation DISABLED")
+            self.flowWarpPipeline = nil
+            self.flowOcclusionPipeline = nil
+            self.flowComposePipeline = nil
+            return
+        }
+
+        func makeCompute(_ name: String) -> MTLComputePipelineState? {
+            guard let function = library.makeFunction(name: name) else {
+                NSLog("MetalFXFrameGenerationEngine: Failed to find function '%@'", name)
+                return nil
+            }
+            do {
+                let pipeline = try device.makeComputePipelineState(function: function)
+                NSLog("MetalFXFrameGenerationEngine: Loaded compute pipeline '%@'", name)
+                return pipeline
+            } catch {
+                NSLog("MetalFXFrameGenerationEngine: Failed to create pipeline for '%@': %@", name, error.localizedDescription)
+                return nil
+            }
+        }
+
+        self.flowWarpPipeline = makeCompute("flowWarp")
+        self.flowOcclusionPipeline = makeCompute("flowOcclusion")
+        self.flowComposePipeline = makeCompute("flowCompose")
+        
+        NSLog("MetalFXFrameGenerationEngine: isSupported = %d", isSupported ? 1 : 0)
     }
 
     var isSupported: Bool {
-        interpolationPipelineState != nil &&
-            flowPipelineState != nil &&
-            colorSampler != nil &&
-            flowSampler != nil
+        flowWarpPipeline != nil &&
+        flowOcclusionPipeline != nil &&
+        flowComposePipeline != nil
     }
 
-    func interpolate(
-        commandBuffer: MTLCommandBuffer,
-        previousTexture: MTLTexture,
-        currentTexture: MTLTexture,
-        auxiliary: FrameGenerationAuxiliary,
-        deltaTime: Float
-    ) throws -> MTLTexture {
-        _ = auxiliary
-        let normalizedDelta = max(0.0, min(deltaTime * 60.0, 1.0))
-        let blendFactor = max(0.25, min(0.75, normalizedDelta * 0.5))
-        return try interpolate(
-            commandBuffer: commandBuffer,
-            previousTexture: previousTexture,
-            currentTexture: currentTexture,
-            blendFactor: blendFactor,
-            motionHint: .zero
-        )
-    }
-
-    func interpolate(
-        commandBuffer: MTLCommandBuffer,
-        previousTexture: MTLTexture,
-        currentTexture: MTLTexture,
-        blendFactor: Float,
-        motionHint: SIMD2<Float> = .zero
-    ) throws -> MTLTexture {
-        guard isSupported,
-              let interpolationPipelineState,
-              let flowPipelineState,
-              let colorSampler,
-              let flowSampler else {
-            throw FrameGenerationError.unsupportedDevice
-        }
-
-        guard previousTexture.width == currentTexture.width,
-              previousTexture.height == currentTexture.height,
-              previousTexture.pixelFormat == currentTexture.pixelFormat else {
-            throw FrameGenerationError.incompatibleTextures
-        }
-
-        guard let outputTexture = ensureOutputTexture(matching: currentTexture) else {
-            throw FrameGenerationError.outputTextureCreationFailed
-        }
-        guard let flowTexture = ensureFlowTexture(matching: currentTexture) else {
-            throw FrameGenerationError.flowTextureCreationFailed
-        }
-
-        try encodeFlowEstimation(
-            commandBuffer: commandBuffer,
-            pipelineState: flowPipelineState,
-            previousTexture: previousTexture,
-            currentTexture: currentTexture,
-            flowTexture: flowTexture
-        )
-
-        try encodeInterpolation(
-            commandBuffer: commandBuffer,
-            pipelineState: interpolationPipelineState,
-            colorSampler: colorSampler,
-            flowSampler: flowSampler,
-            previousTexture: previousTexture,
-            currentTexture: currentTexture,
-            flowTexture: flowTexture,
-            outputTexture: outputTexture,
-            blendFactor: blendFactor,
-            motionHint: motionHint
-        )
-
-        return outputTexture
-    }
-
-    private func encodeFlowEstimation(
-        commandBuffer: MTLCommandBuffer,
-        pipelineState: MTLComputePipelineState,
-        previousTexture: MTLTexture,
-        currentTexture: MTLTexture,
-        flowTexture: MTLTexture
-    ) throws {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            throw FrameGenerationError.pipelineCreationFailed
-        }
-
-        let pixelCount = previousTexture.width * previousTexture.height
-        let searchRadius: UInt32
-        let sampleStep: UInt32
-        if pixelCount >= (2560 * 1440) {
-            searchRadius = 2
-            sampleStep = 3
-        } else if pixelCount >= (1920 * 1080) {
-            searchRadius = 2
-            sampleStep = 2
+    /// Called when a new captured frame is available.
+    /// Submits flow request and stores for interpolation.
+    func onNewCapturedFrame(_ texture: MTLTexture) {
+        if let prev = previousFrameTexture,
+           prev.width == texture.width,
+           prev.height == texture.height {
+            flowFrameCounter += 1
+            NSLog("FrameGenEngine: Submitting flow request #%llu (%dx%d)", flowFrameCounter, texture.width, texture.height)
+            visionFlowProvider.submitFlowRequest(
+                prev: prev, next: texture, frameID: flowFrameCounter
+            )
         } else {
-            searchRadius = 3
-            sampleStep = 2
+            NSLog("FrameGenEngine: onNewCapturedFrame skipped (no previous or size mismatch)")
         }
-
-        let uniforms = FlowUniforms(
-            imageSize: SIMD2<UInt32>(
-                UInt32(previousTexture.width),
-                UInt32(previousTexture.height)
-            ),
-            flowSize: SIMD2<UInt32>(
-                UInt32(flowTexture.width),
-                UInt32(flowTexture.height)
-            ),
-            blockSize: UInt32(Self.flowBlockSize),
-            searchRadius: searchRadius,
-            sampleStep: sampleStep,
-            searchStep: 2
-        )
-
-        encoder.setComputePipelineState(pipelineState)
-        encoder.setTexture(previousTexture, index: 0)
-        encoder.setTexture(currentTexture, index: 1)
-        encoder.setTexture(flowTexture, index: 2)
-        var uniformsCopy = uniforms
-        encoder.setBytes(&uniformsCopy, length: MemoryLayout<FlowUniforms>.stride, index: 0)
-
-        let w = pipelineState.threadExecutionWidth
-        let h = max(1, pipelineState.maxTotalThreadsPerThreadgroup / w)
-        let threadsPerGroup = MTLSize(width: w, height: h, depth: 1)
-        let threadCount = MTLSize(width: flowTexture.width, height: flowTexture.height, depth: 1)
-        encoder.dispatchThreads(threadCount, threadsPerThreadgroup: threadsPerGroup)
-        encoder.endEncoding()
+        previousFrameTexture = texture
+        hasPendingInterpolatedFrame = true
     }
 
-    private func encodeInterpolation(
+    /// Try to generate an interpolated frame between last two captured frames.
+    /// Returns the interpolated texture if successful, or nil (caller should use shader blend as fallback).
+    func generateInterpolatedFrame(
         commandBuffer: MTLCommandBuffer,
-        pipelineState: MTLRenderPipelineState,
-        colorSampler: MTLSamplerState,
-        flowSampler: MTLSamplerState,
-        previousTexture: MTLTexture,
+        prevTexture: MTLTexture,
         currentTexture: MTLTexture,
-        flowTexture: MTLTexture,
-        outputTexture: MTLTexture,
-        blendFactor: Float,
-        motionHint: SIMD2<Float>
-    ) throws {
-        let renderPass = MTLRenderPassDescriptor()
-        renderPass.colorAttachments[0].texture = outputTexture
-        renderPass.colorAttachments[0].loadAction = .dontCare
-        renderPass.colorAttachments[0].storeAction = .store
-
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
-            throw FrameGenerationError.pipelineCreationFailed
+        blendFactor: Float
+    ) -> MTLTexture? {
+        guard isSupported else {
+            NSLog("FrameGenEngine: NOT SUPPORTED (pipeline creation failed)")
+            return nil
+        }
+        guard prevTexture.width == currentTexture.width,
+              prevTexture.height == currentTexture.height else {
+            NSLog("FrameGenEngine: Size mismatch prev=%dx%d cur=%dx%d",
+                  prevTexture.width, prevTexture.height, currentTexture.width, currentTexture.height)
+            return nil
         }
 
-        let globalMotionUV = SIMD2<Float>(
-            motionHint.x / Float(max(1, currentTexture.width)),
-            motionHint.y / Float(max(1, currentTexture.height))
-        )
+        // Use the latest available Vision flow (may be from previous pair — temporal coherence)
+        guard let flowResult = visionFlowProvider.latestFlow() else {
+            // Only log occasionally to avoid spam
+            return nil  // No flow available yet, caller uses shader blend fallback
+        }
 
-        var uniforms = InterpolationUniforms(
-            blendFactor: max(0.0, min(blendFactor, 1.0)),
-            invOutputSize: SIMD2<Float>(
-                1.0 / Float(max(1, currentTexture.width)),
-                1.0 / Float(max(1, currentTexture.height))
-            ),
-            globalMotionUV: simd_clamp(
-                globalMotionUV,
-                SIMD2<Float>(repeating: -0.08),
-                SIMD2<Float>(repeating: 0.08)
-            ),
-            flowInfluence: 1.0
-        )
+        let flowFwd = flowResult.forward
+        let flowBwd = flowResult.backward
 
-        encoder.setRenderPipelineState(pipelineState)
-        encoder.setFragmentTexture(previousTexture, index: 0)
-        encoder.setFragmentTexture(currentTexture, index: 1)
-        encoder.setFragmentTexture(flowTexture, index: 2)
-        encoder.setFragmentSamplerState(colorSampler, index: 0)
-        encoder.setFragmentSamplerState(flowSampler, index: 1)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<InterpolationUniforms>.stride, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        // Flow textures must match frame dimensions for warp to work correctly
+        // Vision may return different resolution flow — that's OK, we can still use it
+        // The shader samples using UV coords so resolution mismatch is handled
+        NSLog("FrameGenEngine: Using VISION FLOW (fwd=%dx%d frame=%dx%d blend=%.2f)",
+              flowFwd.width, flowFwd.height, prevTexture.width, prevTexture.height, blendFactor)
+
+        return interpolateWithFlow(
+            prev: prevTexture, next: currentTexture,
+            flowForward: flowFwd, flowBackward: flowBwd,
+            t: blendFactor, commandBuffer: commandBuffer
+        )
+    }
+
+    func reset() {
+        visionFlowProvider.reset()
+        flowFrameCounter = 0
+        previousFrameTexture = nil
+        hasPendingInterpolatedFrame = false
+        occlusionTexture = nil
+        warpedPrevTexture = nil
+        warpedNextTexture = nil
+        preGeneratedFrame = nil
+    }
+
+    // MARK: - Private
+
+    private func interpolateWithFlow(
+        prev: MTLTexture, next: MTLTexture,
+        flowForward: MTLTexture, flowBackward: MTLTexture,
+        t: Float, commandBuffer: MTLCommandBuffer
+    ) -> MTLTexture? {
+        guard let flowWarpPipeline,
+              let flowOcclusionPipeline,
+              let flowComposePipeline else { return nil }
+
+        let w = prev.width
+        let h = prev.height
+
+        guard let occlusion = ensureTexture(&occlusionTexture, width: w, height: h, pixelFormat: .r16Float),
+              let warpPrev = ensureTexture(&warpedPrevTexture, width: w, height: h),
+              let warpNext = ensureTexture(&warpedNextTexture, width: w, height: h),
+              let output = ensureTexture(&preGeneratedFrame, width: w, height: h) else { return nil }
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
+
+        // 1. Occlusion detection
+        var occParams = FlowOcclusionParams(threshold: flowOcclusionThreshold)
+        encoder.setComputePipelineState(flowOcclusionPipeline)
+        encoder.setTexture(flowForward, index: 0)
+        encoder.setTexture(flowBackward, index: 1)
+        encoder.setTexture(occlusion, index: 2)
+        encoder.setBytes(&occParams, length: MemoryLayout<FlowOcclusionParams>.size, index: 0)
+        dispatchThreads(pipeline: flowOcclusionPipeline, encoder: encoder, width: w, height: h)
+
+        // 2. Warp prev frame forward by t
+        var warpPrevParams = FlowWarpParams(scale: t)
+        encoder.setComputePipelineState(flowWarpPipeline)
+        encoder.setTexture(prev, index: 0)
+        encoder.setTexture(flowForward, index: 1)
+        encoder.setTexture(warpPrev, index: 2)
+        encoder.setBytes(&warpPrevParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
+        dispatchThreads(pipeline: flowWarpPipeline, encoder: encoder, width: w, height: h)
+
+        // 3. Warp next frame backward by (1-t)
+        var warpNextParams = FlowWarpParams(scale: (1.0 - t))
+        encoder.setComputePipelineState(flowWarpPipeline)
+        encoder.setTexture(next, index: 0)
+        encoder.setTexture(flowBackward, index: 1)
+        encoder.setTexture(warpNext, index: 2)
+        encoder.setBytes(&warpNextParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
+        dispatchThreads(pipeline: flowWarpPipeline, encoder: encoder, width: w, height: h)
+
+        // 4. Compose final interpolated frame
+        var composeParams = FlowComposeParams(
+            t: t,
+            errorThreshold: 0.1,
+            flowThreshold: flowOcclusionThreshold
+        )
+        encoder.setComputePipelineState(flowComposePipeline)
+        encoder.setTexture(warpPrev, index: 0)
+        encoder.setTexture(warpNext, index: 1)
+        encoder.setTexture(occlusion, index: 2)
+        encoder.setTexture(prev, index: 3)
+        encoder.setTexture(next, index: 4)
+        encoder.setTexture(output, index: 5)
+        encoder.setBytes(&composeParams, length: MemoryLayout<FlowComposeParams>.size, index: 0)
+        dispatchThreads(pipeline: flowComposePipeline, encoder: encoder, width: w, height: h)
+
         encoder.endEncoding()
+        return output
     }
 
-    private func ensureOutputTexture(matching texture: MTLTexture) -> MTLTexture? {
-        if let outputTexture,
-           outputTexture.width == texture.width,
-           outputTexture.height == texture.height,
-           outputTexture.pixelFormat == texture.pixelFormat {
-            return outputTexture
+    private func ensureTexture(_ texture: inout MTLTexture?, width: Int, height: Int,
+                                pixelFormat: MTLPixelFormat = .bgra8Unorm) -> MTLTexture? {
+        if let tex = texture,
+           tex.width == width,
+           tex.height == height,
+           tex.pixelFormat == pixelFormat {
+            return tex
         }
 
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: texture.pixelFormat,
-            width: texture.width,
-            height: texture.height,
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: pixelFormat,
+            width: width,
+            height: height,
             mipmapped: false
         )
-        descriptor.usage = [.renderTarget, .shaderRead]
-        descriptor.storageMode = .private
-
-        outputTexture = device.makeTexture(descriptor: descriptor)
-        return outputTexture
+        desc.usage = [.shaderRead, .shaderWrite]
+        desc.storageMode = .private
+        texture = device.makeTexture(descriptor: desc)
+        return texture
     }
 
-    private func ensureFlowTexture(matching texture: MTLTexture) -> MTLTexture? {
-        let flowWidth = max(1, (texture.width + (Self.flowBlockSize - 1)) / Self.flowBlockSize)
-        let flowHeight = max(1, (texture.height + (Self.flowBlockSize - 1)) / Self.flowBlockSize)
-
-        if let flowTexture,
-           flowTexture.width == flowWidth,
-           flowTexture.height == flowHeight,
-           flowTexture.pixelFormat == .rg16Float {
-            return flowTexture
-        }
-
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rg16Float,
-            width: flowWidth,
-            height: flowHeight,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead, .shaderWrite]
-        descriptor.storageMode = .private
-
-        flowTexture = device.makeTexture(descriptor: descriptor)
-        return flowTexture
-    }
-
-    private static func buildResources(device: MTLDevice) -> (
-        interpolationPipelineState: MTLRenderPipelineState?,
-        flowPipelineState: MTLComputePipelineState?,
-        colorSampler: MTLSamplerState?,
-        flowSampler: MTLSamplerState?
-    ) {
-        let source = """
-#include <metal_stdlib>
-using namespace metal;
-
-struct VertexOut {
-    float4 position [[position]];
-    float2 uv;
-};
-
-struct InterpolationUniforms {
-    float blendFactor;
-    float2 invOutputSize;
-    float2 globalMotionUV;
-    float flowInfluence;
-};
-
-struct FlowUniforms {
-    uint2 imageSize;
-    uint2 flowSize;
-    uint blockSize;
-    uint searchRadius;
-    uint sampleStep;
-    uint searchStep;
-};
-
-inline uint2 clampCoord(int2 coord, uint2 size) {
-    const int maxX = int(size.x) - 1;
-    const int maxY = int(size.y) - 1;
-    return uint2(
-        uint(clamp(coord.x, 0, maxX)),
-        uint(clamp(coord.y, 0, maxY))
-    );
-}
-
-inline float luminance(float3 color) {
-    return dot(color, float3(0.2126, 0.7152, 0.0722));
-}
-
-kernel void kernelEstimateFlow(
-    texture2d<float, access::read> previousTexture [[texture(0)]],
-    texture2d<float, access::read> currentTexture [[texture(1)]],
-    texture2d<half, access::write> flowTexture [[texture(2)]],
-    constant FlowUniforms &uniforms [[buffer(0)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    if (gid.x >= uniforms.flowSize.x || gid.y >= uniforms.flowSize.y) {
-        return;
-    }
-
-    const int2 center = int2(
-        int(gid.x * uniforms.blockSize + (uniforms.blockSize / 2)),
-        int(gid.y * uniforms.blockSize + (uniforms.blockSize / 2))
-    );
-
-    const int radius = int(uniforms.searchRadius);
-    const int sampleStep = max(1, int(uniforms.sampleStep));
-    const int searchStep = max(1, int(uniforms.searchStep));
-
-    float bestError = 1e20;
-    int2 bestOffset = int2(0);
-
-    for (int oy = -radius; oy <= radius; ++oy) {
-        for (int ox = -radius; ox <= radius; ++ox) {
-            const int2 candidateOffset = int2(ox * searchStep, oy * searchStep);
-            float error = 0.0;
-
-            for (int sy = -1; sy <= 1; ++sy) {
-                for (int sx = -1; sx <= 1; ++sx) {
-                    const int2 sampleOffset = int2(sx * sampleStep, sy * sampleStep);
-                    const uint2 prevCoord = clampCoord(center + sampleOffset, uniforms.imageSize);
-                    const uint2 currCoord = clampCoord(center + sampleOffset + candidateOffset, uniforms.imageSize);
-
-                    const float prevLuma = luminance(previousTexture.read(prevCoord).rgb);
-                    const float currLuma = luminance(currentTexture.read(currCoord).rgb);
-                    error += fabs(prevLuma - currLuma);
-                }
-            }
-
-            if (error < bestError) {
-                bestError = error;
-                bestOffset = candidateOffset;
-            }
-        }
-    }
-
-    flowTexture.write(half2(float2(bestOffset)), gid);
-}
-
-vertex VertexOut vertexFullscreen(uint vertexID [[vertex_id]]) {
-    constexpr float2 positions[3] = {
-        float2(-1.0, -1.0),
-        float2(3.0, -1.0),
-        float2(-1.0, 3.0)
-    };
-
-    constexpr float2 uvs[3] = {
-        float2(0.0, 1.0),
-        float2(2.0, 1.0),
-        float2(0.0, -1.0)
-    };
-
-    VertexOut out;
-    out.position = float4(positions[vertexID], 0.0, 1.0);
-    out.uv = uvs[vertexID];
-    return out;
-}
-
-fragment float4 fragmentInterpolate(
-    VertexOut in [[stage_in]],
-    texture2d<float> previousTexture [[texture(0)]],
-    texture2d<float> currentTexture [[texture(1)]],
-    texture2d<half> flowTexture [[texture(2)]],
-    sampler colorSampler [[sampler(0)]],
-    sampler flowSampler [[sampler(1)]],
-    constant InterpolationUniforms &uniforms [[buffer(0)]]
-) {
-    const float2 uv = saturate(in.uv);
-    const float blend = saturate(uniforms.blendFactor);
-
-    const float2 flowPixels = float2(flowTexture.sample(flowSampler, uv));
-    const float2 flowUV = (flowPixels * uniforms.invOutputSize * uniforms.flowInfluence) + uniforms.globalMotionUV;
-
-    const float2 prevUV = saturate(uv - (flowUV * blend));
-    const float2 currUV = saturate(uv + (flowUV * (1.0 - blend)));
-
-    const float3 prevWarped = previousTexture.sample(colorSampler, prevUV).rgb;
-    const float3 currWarped = currentTexture.sample(colorSampler, currUV).rgb;
-    const float3 warped = mix(prevWarped, currWarped, blend);
-
-    const float3 prevCenter = previousTexture.sample(colorSampler, uv).rgb;
-    const float3 currCenter = currentTexture.sample(colorSampler, uv).rgb;
-    const float3 fallback = mix(prevCenter, currCenter, blend);
-
-    const float warpMismatch = length(prevWarped - currWarped);
-    const float fallbackWeight = clamp(warpMismatch * 2.25, 0.0, 1.0) * 0.45;
-    const float3 color = mix(warped, fallback, fallbackWeight);
-
-    return float4(color, 1.0);
-}
-"""
-
-        guard let library = try? device.makeLibrary(source: source, options: nil),
-              let vertex = library.makeFunction(name: "vertexFullscreen"),
-              let fragment = library.makeFunction(name: "fragmentInterpolate"),
-              let flowKernel = library.makeFunction(name: "kernelEstimateFlow") else {
-            return (nil, nil, nil, nil)
-        }
-
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = vertex
-        descriptor.fragmentFunction = fragment
-        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-
-        guard let interpolationPipelineState = try? device.makeRenderPipelineState(descriptor: descriptor),
-              let flowPipelineState = try? device.makeComputePipelineState(function: flowKernel) else {
-            return (nil, nil, nil, nil)
-        }
-
-        let colorSamplerDescriptor = MTLSamplerDescriptor()
-        colorSamplerDescriptor.minFilter = .linear
-        colorSamplerDescriptor.magFilter = .linear
-        colorSamplerDescriptor.mipFilter = .notMipmapped
-        colorSamplerDescriptor.sAddressMode = .clampToEdge
-        colorSamplerDescriptor.tAddressMode = .clampToEdge
-
-        let flowSamplerDescriptor = MTLSamplerDescriptor()
-        flowSamplerDescriptor.minFilter = .linear
-        flowSamplerDescriptor.magFilter = .linear
-        flowSamplerDescriptor.mipFilter = .notMipmapped
-        flowSamplerDescriptor.sAddressMode = .clampToEdge
-        flowSamplerDescriptor.tAddressMode = .clampToEdge
-
-        guard let colorSampler = device.makeSamplerState(descriptor: colorSamplerDescriptor),
-              let flowSampler = device.makeSamplerState(descriptor: flowSamplerDescriptor) else {
-            return (nil, nil, nil, nil)
-        }
-
-        return (interpolationPipelineState, flowPipelineState, colorSampler, flowSampler)
+    private func dispatchThreads(pipeline: MTLComputePipelineState,
+                                 encoder: MTLComputeCommandEncoder,
+                                 width: Int, height: Int) {
+        let threadW = pipeline.threadExecutionWidth
+        let threadH = pipeline.maxTotalThreadsPerThreadgroup / threadW
+        let threadsPerGroup = MTLSize(width: threadW, height: threadH, depth: 1)
+        let grid = MTLSize(width: (width + threadW - 1) / threadW,
+                           height: (height + threadH - 1) / threadH,
+                           depth: 1)
+        encoder.dispatchThreadgroups(grid, threadsPerThreadgroup: threadsPerGroup)
     }
 }

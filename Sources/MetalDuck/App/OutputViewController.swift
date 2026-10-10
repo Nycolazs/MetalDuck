@@ -6,7 +6,6 @@ final class OutputViewController: NSViewController {
     let mtkView: MTKView
 
     private let telemetryContainer = NSVisualEffectView()
-    private let statusLabel = NSTextField(labelWithString: "● STOPPED")
     private let sourceFPSLabel = NSTextField(labelWithString: "SOURCE FPS: 0.0")
     private let generatedFPSLabel = NSTextField(labelWithString: "GEN FPS: 0.0")
     private let captureFPSLabel = NSTextField(labelWithString: "CAP FPS: 0.0")
@@ -39,13 +38,12 @@ final class OutputViewController: NSViewController {
         telemetryContainer.layer?.cornerRadius = 10
         telemetryContainer.layer?.masksToBounds = true
 
-        let stack = NSStackView(views: [statusLabel, sourceFPSLabel, generatedFPSLabel, captureFPSLabel, outputFPSLabel, resolutionLabel, detailLabel])
+        let stack = NSStackView(views: [sourceFPSLabel, generatedFPSLabel, captureFPSLabel, outputFPSLabel, resolutionLabel, detailLabel])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 4
 
-        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .bold)
         sourceFPSLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
         generatedFPSLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
         captureFPSLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
@@ -79,6 +77,10 @@ final class OutputViewController: NSViewController {
             stack.bottomAnchor.constraint(equalTo: telemetryContainer.bottomAnchor, constant: -10),
             stack.widthAnchor.constraint(greaterThanOrEqualToConstant: 250)
         ])
+
+        let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(handleDoubleClick(_:)))
+        doubleClick.numberOfClicksRequired = 2
+        rootView.addGestureRecognizer(doubleClick)
 
         self.view = rootView
         setProcessingState(isRunning: false)
@@ -126,26 +128,11 @@ final class OutputViewController: NSViewController {
             detailLabel.stringValue = String(format: "Scale %.2fx  |  %@  |  Processing active", stats.effectiveScale, fgState)
         }
 
-        if stats.isRunning && stats.sourceFPS > 0.5 {
-            statusLabel.stringValue = "● ACTIVE"
-            statusLabel.textColor = NSColor.systemGreen
-        } else if stats.isRunning {
-            statusLabel.stringValue = "● WAITING"
-            statusLabel.textColor = NSColor.systemOrange
-        } else {
-            statusLabel.stringValue = "● STOPPED"
-            statusLabel.textColor = NSColor.systemRed
-        }
+        // Status updates removed per user request for clean UI
     }
 
     func setProcessingState(isRunning: Bool) {
-        if isRunning {
-            statusLabel.stringValue = "● WAITING"
-            statusLabel.textColor = NSColor.systemOrange
-            detailLabel.stringValue = "Waiting for frames..."
-        } else {
-            statusLabel.stringValue = "● STOPPED"
-            statusLabel.textColor = NSColor.systemRed
+        if !isRunning {
             sourceFPSLabel.stringValue = "SOURCE FPS: 0.0"
             generatedFPSLabel.stringValue = "GEN FPS: 0.0"
             captureFPSLabel.stringValue = "CAP FPS: 0.0"
@@ -156,14 +143,10 @@ final class OutputViewController: NSViewController {
     }
 
     func setWaitingForFrames(message: String) {
-        statusLabel.stringValue = "● WAITING"
-        statusLabel.textColor = NSColor.systemOrange
         detailLabel.stringValue = message
     }
 
     func setCaptureError(_ message: String) {
-        statusLabel.stringValue = "● ERROR"
-        statusLabel.textColor = NSColor.systemRed
         detailLabel.stringValue = message
     }
 
@@ -173,5 +156,9 @@ final class OutputViewController: NSViewController {
 
     func updateColorSpace(_ colorSpace: CGColorSpace?) {
         mtkView.colorspace = colorSpace
+    }
+
+    @objc private func handleDoubleClick(_ gesture: NSClickGestureRecognizer) {
+        view.window?.toggleFullScreen(nil)
     }
 }

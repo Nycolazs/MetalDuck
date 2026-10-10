@@ -33,6 +33,8 @@ enum RendererCoordinatorError: Error {
 final class RendererCoordinator: NSObject {
     let settingsStore: SettingsStore
     var onStatsUpdate: ((RendererStats) -> Void)?
+    var onGeometryUpdate: ((CGRect) -> Void)?
+    var onError: ((Error) -> Void)?
 
     private let context: MetalContext
     private let captureService: FrameCaptureService
@@ -57,11 +59,13 @@ final class RendererCoordinator: NSObject {
     private var fpsWindowStart: CFTimeInterval = CACurrentMediaTime()
 
     private var upscaledScratchTexture: MTLTexture?
+    private var secondaryUpscaledScratchTexture: MTLTexture?
     private var stagedFrameTextures: [MTLTexture?] = [nil, nil]
     private var stagedFrameWriteIndex: Int = 0
     private var currentFrameTexture: MTLTexture?
     private var previousFrameTexture: MTLTexture?
-    private var interpolatedBlendQueue: [Float] = []
+    private var lastCaptureHostTime: CFTimeInterval = 0
+
 
     private var lastInputTexture: MTLTexture?
     private var lastOutputTexture: MTLTexture?
@@ -72,6 +76,7 @@ final class RendererCoordinator: NSObject {
     private var renderPipelineState: MTLRenderPipelineState
     private var linearSampler: MTLSamplerState
     private var nearestSampler: MTLSamplerState
+    private var library: MTLLibrary
 
     private var running = false
     private var smoothedPresentFrameTime: Double = 1.0 / 60.0
@@ -79,6 +84,10 @@ final class RendererCoordinator: NSObject {
     private var lastCaptureTimestamp: CMTime?
     private var dynamicScaleFactor: Float = 1.0
     private var loggedFallbackFrameGeneration = false
+
+    // Presentation Pacing State
+    private var activePresentation: (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool)?
+    private var activePresentationExpiration: CFTimeInterval = 0
 
     // If you have motion/depth data from a game integration layer,
     // assign a provider to activate interpolation.
@@ -100,15 +109,16 @@ final class RendererCoordinator: NSObject {
         self.activeCaptureTarget = initialTarget
 
         self.upscaler = MetalFXSpatialUpscaler(device: context.device)
-        self.frameGenerationEngine = MetalFXFrameGenerationEngine(device: context.device)
-
-        let (pipelineState, linearSampler, nearestSampler) = try Self.buildPresentationResources(
+        let (pipelineState, linearSampler, nearestSampler, lib) = try Self.buildPresentationResources(
             device: context.device,
             pixelFormat: .bgra8Unorm
         )
+        self.frameGenerationEngine = MetalFXFrameGenerationEngine(device: context.device, commandQueue: context.commandQueue, library: lib)
+
         self.renderPipelineState = pipelineState
         self.linearSampler = linearSampler
         self.nearestSampler = nearestSampler
+        self.library = lib
 
         self.view = view
 
@@ -131,6 +141,7 @@ final class RendererCoordinator: NSObject {
         try await captureService.start()
         running = true
         resetFrameState()
+        frameGenerationEngine.reset()
         lastCaptureTimestamp = nil
         lastPresentHostTime = nil
         smoothedPresentFrameTime = 1.0 / 60.0
@@ -142,6 +153,7 @@ final class RendererCoordinator: NSObject {
         await captureService.stop()
         running = false
         resetFrameState()
+        frameGenerationEngine.reset()
         lastCaptureTimestamp = nil
     }
 
@@ -154,8 +166,18 @@ final class RendererCoordinator: NSObject {
     @MainActor
     func reconfigureCapture(configuration: CaptureConfiguration) async throws {
         captureConfiguration = configuration
-        view?.preferredFramesPerSecond = max(configuration.framesPerSecond, 1)
         try await captureService.reconfigure(configuration: configuration)
+        updateViewFPS()
+    }
+
+    @MainActor
+    private func updateViewFPS() {
+        guard let view = self.view else { return }
+        let settings = settingsStore.snapshot()
+        let targetFPS = preferredPresentationFPS(for: settings)
+        if view.preferredFramesPerSecond != targetFPS {
+            view.preferredFramesPerSecond = targetFPS
+        }
     }
 
     @MainActor
@@ -164,7 +186,10 @@ final class RendererCoordinator: NSObject {
         view.colorPixelFormat = .bgra8Unorm
         view.clearColor = MTLClearColor(red: 0.06, green: 0.07, blue: 0.08, alpha: 1.0)
         view.framebufferOnly = false
-        view.preferredFramesPerSecond = max(captureConfiguration.framesPerSecond, 1)
+        // IMPORTANT: Start at 120fps to ensure the render loop runs fast enough
+        // to display interpolated intermediate frames. The capture rate is separate.
+        let initialSettings = settingsStore.snapshot()
+        view.preferredFramesPerSecond = preferredPresentationFPS(for: initialSettings)
         view.enableSetNeedsDisplay = false
         view.isPaused = false
         view.delegate = self
@@ -182,11 +207,14 @@ final class RendererCoordinator: NSObject {
             self.statsLock.lock()
             self.rawCaptureFrameCounter += 1
             self.statsLock.unlock()
+
+            self.onGeometryUpdate?(frame.targetRect)
         }
 
         captureService.onError = { [weak self] error in
             NSLog("Capture stream stopped with error: \(error.localizedDescription)")
             self?.running = false
+            self?.onError?(error)
         }
     }
 
@@ -207,11 +235,12 @@ final class RendererCoordinator: NSObject {
         frameLock.unlock()
 
         upscaledScratchTexture = nil
+        secondaryUpscaledScratchTexture = nil
         stagedFrameTextures = [nil, nil]
         stagedFrameWriteIndex = 0
         currentFrameTexture = nil
         previousFrameTexture = nil
-        interpolatedBlendQueue.removeAll(keepingCapacity: true)
+        lastMotionHintPixels = .zero
         lastInputTexture = nil
         lastOutputTexture = nil
         lastEffectiveScale = 1.0
@@ -225,12 +254,15 @@ final class RendererCoordinator: NSObject {
         generatedFrameCounter = 0
         fpsWindowStart = CACurrentMediaTime()
         statsLock.unlock()
+
+        activePresentation = nil
+        activePresentationExpiration = 0
     }
 
     private static func buildPresentationResources(
         device: MTLDevice,
         pixelFormat: MTLPixelFormat
-    ) throws -> (MTLRenderPipelineState, MTLSamplerState, MTLSamplerState) {
+    ) throws -> (MTLRenderPipelineState, MTLSamplerState, MTLSamplerState, MTLLibrary) {
         let source = try loadPresentShaderSource()
 
         let library: MTLLibrary
@@ -276,7 +308,7 @@ final class RendererCoordinator: NSObject {
             throw RendererCoordinatorError.pipelineCreationFailed
         }
 
-        return (pipelineState, linearSampler, nearestSampler)
+        return (pipelineState, linearSampler, nearestSampler, library)
     }
 
     private static func loadPresentShaderSource() throws -> String {
@@ -286,14 +318,16 @@ final class RendererCoordinator: NSObject {
             ("Present", nil)
         ]
 
-        for location in resourceLocations {
-            if let url = Bundle.module.url(
-                forResource: location.name,
-                withExtension: "metal",
-                subdirectory: location.subdirectory
-            ),
-               let source = try? String(contentsOf: url, encoding: .utf8) {
-                return source
+        if let bundle = Bundle.safeModule {
+            for location in resourceLocations {
+                if let url = bundle.url(
+                    forResource: location.name,
+                    withExtension: "metal",
+                    subdirectory: location.subdirectory
+                ),
+                   let source = try? String(contentsOf: url, encoding: .utf8) {
+                    return source
+                }
             }
         }
 
@@ -469,10 +503,12 @@ fragment float4 fragmentPresent(
         sourceTexture: MTLTexture,
         frameGenerationEnabled: Bool
     ) -> MTLTexture? {
+        // Update capture timing for the time-based clock
+        lastCaptureHostTime = CACurrentMediaTime()
+        
         if !frameGenerationEnabled {
             currentFrameTexture = sourceTexture
             previousFrameTexture = nil
-            interpolatedBlendQueue.removeAll(keepingCapacity: true)
             return sourceTexture
         }
 
@@ -503,7 +539,6 @@ fragment float4 fragmentPresent(
             previousFrameTexture = readTexture
         } else {
             previousFrameTexture = nil
-            interpolatedBlendQueue.removeAll(keepingCapacity: true)
         }
 
         encodeTextureCopy(
@@ -544,19 +579,9 @@ fragment float4 fragmentPresent(
         return texture
     }
 
-    private func rebuildInterpolatedBlendQueue(mode: FrameGenerationMode) {
-        interpolatedBlendQueue.removeAll(keepingCapacity: true)
-        switch mode {
-        case .x2:
-            interpolatedBlendQueue.append(0.5)
-        case .x3:
-            interpolatedBlendQueue.append(contentsOf: [Float(1.0 / 3.0), Float(2.0 / 3.0)])
-        }
-    }
 
-    private func clearInterpolatedBlendQueue() {
-        interpolatedBlendQueue.removeAll(keepingCapacity: true)
-    }
+
+
 
     private func presentationScale(
         sourceTexture: MTLTexture,
@@ -647,7 +672,13 @@ fragment float4 fragmentPresent(
             return userTarget
         }
 
-        let multiplier = settings.frameGenerationMode == .x2 ? 2 : 3
+        let multiplier: Int
+        switch settings.frameGenerationMode {
+        case .x2: multiplier = 2
+        case .x3: multiplier = 3
+        case .x4: multiplier = 4
+        }
+        
         let fgCeiling = configuredCaptureFPS * multiplier
         return min(userTarget, fgCeiling)
     }
@@ -655,6 +686,7 @@ fragment float4 fragmentPresent(
     private func upscaleIfNeeded(
         commandBuffer: MTLCommandBuffer,
         inputTexture: MTLTexture,
+        scratchBuffer: inout MTLTexture?,
         settings: RenderSettings,
         scale: Float
     ) -> MTLTexture {
@@ -668,7 +700,7 @@ fragment float4 fragmentPresent(
         switch settings.upscalingAlgorithm {
         case .nativeLinear:
             guard let outputTexture = ensureReusableTexture(
-                texture: &upscaledScratchTexture,
+                texture: &scratchBuffer,
                 width: outputWidth,
                 height: outputHeight,
                 pixelFormat: inputTexture.pixelFormat
@@ -684,9 +716,9 @@ fragment float4 fragmentPresent(
             )
             return outputTexture
 
-        case .metalFXSpatial:
+        case .metalFXSpatial, .metalFXTemporal:
             guard let outputTexture = ensureReusableTexture(
-                texture: &upscaledScratchTexture,
+                texture: &scratchBuffer,
                 width: outputWidth,
                 height: outputHeight,
                 pixelFormat: inputTexture.pixelFormat
@@ -702,7 +734,7 @@ fragment float4 fragmentPresent(
                 )
                 return outputTexture
             } catch {
-                NSLog("MetalFX spatial upscaling failed, falling back to native linear: \(error.localizedDescription)")
+                NSLog("MetalFX upscaling failed, falling back to native linear: \(error.localizedDescription)")
                 return inputTexture
             }
         }
@@ -713,54 +745,55 @@ fragment float4 fragmentPresent(
         settings: RenderSettings,
         deltaTime: Float
     ) -> (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool)? {
-        guard let currentTexture = currentFrameTexture else {
-            return nil
+        guard let currentTexture = currentFrameTexture else { return nil }
+
+        let now = CACurrentMediaTime()
+
+        // If we have an active presentation that hasn't expired, keep showing it (crucial for 120Hz screens)
+        if let active = activePresentation, (now - activePresentationExpiration) < -0.0005 {
+            return active
         }
 
-        guard settings.frameGenerationEnabled else {
-            return (currentTexture, currentTexture, 0.0, false)
+        guard settings.frameGenerationEnabled, let previousTexture = previousFrameTexture else {
+            let result: (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool) = (currentTexture, currentTexture, 0.0, false)
+            activePresentation = result
+            activePresentationExpiration = now + (1.0 / Double(preferredPresentationFPS(for: settings)))
+            return result
         }
 
-        guard let previousTexture = previousFrameTexture else {
-            return (currentTexture, currentTexture, 0.0, false)
+        // Time-Based Interpolation Logic
+        // Calculate where we are between the last capture and the next expected capture
+        // Use the actual measured interval between the last two frames to support variable frame rates (like 24fps anime)
+        let expectedCaptureInterval = Double(max(1.0 / 240.0, lastCaptureDeltaTime))
+        let elapsedSinceCapture = now - lastCaptureHostTime
+        
+        // Calculate blend factor t [0.0...1.0]
+        // We use a small lag buffer to ensure we always have 'future' data for the next frames
+        let t = Float(max(0.0, min(1.0, elapsedSinceCapture / expectedCaptureInterval)))
+        
+        var result: (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool)
+
+        // Try Vision flow-based interpolation first
+        if frameGenerationEngine.isSupported,
+           let interpolated = frameGenerationEngine.generateInterpolatedFrame(
+               commandBuffer: commandBuffer,
+               prevTexture: previousTexture,
+               currentTexture: currentTexture,
+               blendFactor: t
+           ) {
+            result = (interpolated, interpolated, 0.0, true)
+        } else {
+            // Fallback: shader-based blend
+            result = (previousTexture, currentTexture, t, true)
         }
 
-        if let blend = interpolatedBlendQueue.first {
-            interpolatedBlendQueue.removeFirst()
+        let targetFPS = Double(preferredPresentationFPS(for: settings))
+        let holdDuration = targetFPS > 0 ? (1.0 / targetFPS) : (1.0 / 60.0)
 
-            if frameGenerationEngine.isSupported {
-                if let auxiliary = frameGenerationAuxiliaryProvider?() {
-                    if let interpolated = try? frameGenerationEngine.interpolate(
-                        commandBuffer: commandBuffer,
-                        previousTexture: previousTexture,
-                        currentTexture: currentTexture,
-                        auxiliary: auxiliary,
-                        deltaTime: deltaTime
-                    ) {
-                        return (interpolated, interpolated, 0.0, true)
-                    }
-                }
-
-                if let interpolated = try? frameGenerationEngine.interpolate(
-                    commandBuffer: commandBuffer,
-                    previousTexture: previousTexture,
-                    currentTexture: currentTexture,
-                    blendFactor: blend,
-                    motionHint: lastMotionHintPixels
-                ) {
-                    return (interpolated, interpolated, 0.0, true)
-                }
-            }
-
-            if !loggedFallbackFrameGeneration {
-                NSLog("Frame generation fallback active: present-shader blend interpolation mode")
-                loggedFallbackFrameGeneration = true
-            }
-
-            return (previousTexture, currentTexture, max(0.0, min(blend, 1.0)), true)
-        }
-
-        return (currentTexture, currentTexture, 0.0, false)
+        activePresentation = result
+        activePresentationExpiration = now + holdDuration
+        
+        return result
     }
 
     private func publishStatsIfNeeded(
@@ -823,8 +856,7 @@ extension RendererCoordinator: MTKViewDelegate {
 
         updatePresentFrameTime()
 
-        guard running,
-              let frameSnapshot = snapshotLatestFrame() else {
+        guard running else {
             if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
                 encoder.endEncoding()
             }
@@ -834,45 +866,44 @@ extension RendererCoordinator: MTKViewDelegate {
         }
 
         let settings = settingsStore.snapshot()
-        let targetPresentationFPS = preferredPresentationFPS(for: settings)
-
-        if view.preferredFramesPerSecond != targetPresentationFPS {
-            view.preferredFramesPerSecond = targetPresentationFPS
+        
+        let targetFPS = preferredPresentationFPS(for: settings)
+        if view.preferredFramesPerSecond != targetFPS {
+            view.preferredFramesPerSecond = targetFPS
         }
 
-        if frameSnapshot.sequence != processedFrameSequence {
-            let scale = effectiveScale(
-                for: settings,
-                inputTexture: frameSnapshot.frame.texture,
-                drawableSize: view.drawableSize
-            )
-            let upscaled = upscaleIfNeeded(
-                commandBuffer: commandBuffer,
-                inputTexture: frameSnapshot.frame.texture,
-                settings: settings,
-                scale: scale
-            )
+        let frameSnapshot = snapshotLatestFrame()
+        if let frameSnapshot {
+            if frameSnapshot.sequence != processedFrameSequence {
+                if let stagedTexture = stageCurrentFrameTexture(
+                    commandBuffer: commandBuffer,
+                    sourceTexture: frameSnapshot.frame.texture,
+                    frameGenerationEnabled: settings.frameGenerationEnabled
+                ) {
+                    processedFrameSequence = frameSnapshot.sequence
+                    lastCaptureDeltaTime = captureDeltaTime(for: frameSnapshot.frame.timestamp)
+                    lastMotionHintPixels = frameSnapshot.frame.motionHint
+                    lastInputTexture = frameSnapshot.frame.texture
+                    
+                    let statsScale = effectiveScale(
+                        for: settings,
+                        inputTexture: frameSnapshot.frame.texture,
+                        drawableSize: view.drawableSize
+                    )
+                    lastEffectiveScale = statsScale
 
-            if let stagedTexture = stageCurrentFrameTexture(
-                commandBuffer: commandBuffer,
-                sourceTexture: upscaled,
-                frameGenerationEnabled: settings.frameGenerationEnabled
-            ) {
-                processedFrameSequence = frameSnapshot.sequence
-                lastCaptureDeltaTime = captureDeltaTime(for: frameSnapshot.frame.timestamp)
-                lastMotionHintPixels = frameSnapshot.frame.motionHint
-                lastInputTexture = frameSnapshot.frame.texture
-                lastOutputTexture = stagedTexture
-                lastEffectiveScale = scale
+                    // Notify the engine about the new unscaled frame (for async Vision flow)
+                    if settings.frameGenerationEnabled {
+                        frameGenerationEngine.onNewCapturedFrame(stagedTexture)
+                    }
 
-                if settings.frameGenerationEnabled, previousFrameTexture != nil {
-                    rebuildInterpolatedBlendQueue(mode: settings.frameGenerationMode)
-                } else {
-                    clearInterpolatedBlendQueue()
+
                 }
             }
-        } else if !settings.frameGenerationEnabled {
-            clearInterpolatedBlendQueue()
+        } else {
+            if !settings.frameGenerationEnabled {
+                // Logic for disabling generation goes here if needed
+            }
         }
 
         guard let presentation = resolvePresentationTextures(
@@ -888,6 +919,35 @@ extension RendererCoordinator: MTKViewDelegate {
             return
         }
 
+        // Now upscale the presentation textures (either the real frame or the generated frame)
+        let scale = effectiveScale(
+            for: settings,
+            inputTexture: presentation.primary,
+            drawableSize: view.drawableSize
+        )
+        
+        let finalPrimary = upscaleIfNeeded(
+            commandBuffer: commandBuffer,
+            inputTexture: presentation.primary,
+            scratchBuffer: &upscaledScratchTexture,
+            settings: settings,
+            scale: scale
+        )
+
+        let finalSecondary: MTLTexture
+        if presentation.secondary === presentation.primary {
+            finalSecondary = finalPrimary
+        } else {
+            finalSecondary = upscaleIfNeeded(
+                commandBuffer: commandBuffer,
+                inputTexture: presentation.secondary,
+                scratchBuffer: &secondaryUpscaledScratchTexture,
+                settings: settings,
+                scale: scale
+            )
+        }
+
+        
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -895,12 +955,13 @@ extension RendererCoordinator: MTKViewDelegate {
         }
 
         encoder.setRenderPipelineState(renderPipelineState)
+        lastOutputTexture = finalPrimary
 
         var uniforms = PresentUniforms(
-            contentScale: presentationScale(sourceTexture: presentation.primary, drawableSize: view.drawableSize),
+            contentScale: presentationScale(sourceTexture: finalPrimary, drawableSize: view.drawableSize),
             texelSize: SIMD2<Float>(
-                1.0 / Float(max(1, presentation.primary.width)),
-                1.0 / Float(max(1, presentation.primary.height))
+                1.0 / Float(max(1, finalPrimary.width)),
+                1.0 / Float(max(1, finalPrimary.height))
             ),
             sharpness: max(0.0, min(settings.sharpness, 1.0)),
             blendFactor: presentation.blendFactor
@@ -908,15 +969,15 @@ extension RendererCoordinator: MTKViewDelegate {
 
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<PresentUniforms>.stride, index: 0)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<PresentUniforms>.stride, index: 0)
-        encoder.setFragmentTexture(presentation.primary, index: 0)
-        encoder.setFragmentTexture(presentation.secondary, index: 1)
+        encoder.setFragmentTexture(finalPrimary, index: 0)
+        encoder.setFragmentTexture(finalSecondary, index: 1)
 
         let sampler = settings.samplingMode == .nearest ? nearestSampler : linearSampler
         encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
 
-        let inputForStats = lastInputTexture ?? frameSnapshot.frame.texture
+        let inputForStats = lastInputTexture ?? presentation.primary
         let outputForStats = lastOutputTexture ?? presentation.primary
         publishStatsIfNeeded(
             frameGenerationEnabled: settings.frameGenerationEnabled,

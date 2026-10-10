@@ -3,8 +3,19 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import Metal
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 import simd
+
+enum CaptureStaleError: LocalizedError {
+    case framesStalled
+
+    var errorDescription: String? {
+        switch self {
+        case .framesStalled:
+            return "Source stopped delivering frames. The window may have changed (e.g. fullscreen). Try refreshing sources or switching to Display capture."
+        }
+    }
+}
 
 @available(macOS 12.3, *)
 enum ScreenCaptureServiceError: Error {
@@ -24,7 +35,13 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
     private let sampleQueue = DispatchQueue(label: "metaldck.capture.sckit.sample")
     private var stream: SCStream?
+    private var trackedWindowID: CGWindowID?
+    private var trackedBundleID: String?
+    private var trackedDisplayID: CGDirectDisplayID?
+    
     private let motionEstimator = GlobalMotionEstimator()
+    private var staleTimer: DispatchSourceTimer?
+    private let staleTimeout: TimeInterval = 3.0
 
     init(context: MetalContext, target: CaptureTarget, configuration: CaptureConfiguration) {
         self.context = context
@@ -43,17 +60,26 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         let filter = makeFilter(for: selection, shareableContent: shareableContent)
         let captureSize = resolveCaptureSize(for: selection, filter: filter)
 
+        switch selection {
+        case .window(let window):
+            self.trackedWindowID = window.windowID
+            self.trackedBundleID = window.owningApplication?.bundleIdentifier
+            self.trackedDisplayID = nil
+        case .display(let display):
+            self.trackedDisplayID = display.displayID
+            self.trackedWindowID = nil
+            self.trackedBundleID = nil
+        }
+
         let streamConfiguration = SCStreamConfiguration()
         streamConfiguration.width = captureSize.width
         streamConfiguration.height = captureSize.height
         streamConfiguration.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfiguration.scalesToFit = true
         streamConfiguration.showsCursor = captureConfiguration.showsCursor
-        streamConfiguration.queueDepth = max(1, min(captureConfiguration.queueDepth, 8))
-        streamConfiguration.minimumFrameInterval = CMTime(
-            value: 1,
-            timescale: CMTimeScale(max(captureConfiguration.framesPerSecond, 1))
-        )
+        streamConfiguration.queueDepth = 8 
+        streamConfiguration.minimumFrameInterval = .zero
+        
         if #available(macOS 15.0, *) {
             streamConfiguration.captureDynamicRange = .SDR
         }
@@ -92,13 +118,15 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             return
         }
 
+        let streamToStop = stream
+        self.stream = nil
+
         await withCheckedContinuation { continuation in
-            stream.stopCapture { _ in
+            streamToStop.stopCapture { _ in
                 continuation.resume()
             }
         }
 
-        self.stream = nil
         motionEstimator.reset()
     }
 
@@ -130,8 +158,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
         switch target {
         case .display(let requestedDisplayID):
-            if let requestedDisplayID,
-               let display = shareableContent.displays.first(where: { $0.displayID == requestedDisplayID }) {
+            if let display = shareableContent.displays.first(where: { $0.displayID == requestedDisplayID }) {
                 return .display(display)
             }
             guard let display = shareableContent.displays.first else {
@@ -141,15 +168,42 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
         case .window(let requestedWindowID):
             let candidates = shareableContent.windows.filter {
-                $0.isOnScreen &&
-                    $0.windowLayer == 0 &&
-                    $0.owningApplication?.processID != currentPID
+                $0.owningApplication?.processID != currentPID &&
+                ($0.windowLayer == 0 || $0.isOnScreen)
             }
+            
+            // 1. Try exact match
             if let requestedWindowID,
                let window = candidates.first(where: { $0.windowID == requestedWindowID }) {
                 return .window(window)
             }
-            guard let window = candidates.first else {
+            
+            // 2. Aggressive Re-discovery: If precise window is gone, find the "best" window from the same app
+            let bundleID = shareableContent.windows.first(where: { $0.windowID == requestedWindowID })?.owningApplication?.bundleIdentifier ?? self.trackedBundleID
+            
+            if let bundleID {
+                
+                // Prefer windows that are "on screen" and have a reasonable video size
+                let appWindows = candidates.filter { $0.owningApplication?.bundleIdentifier == bundleID }
+                let videoCandidates = appWindows.filter { 
+                    $0.isOnScreen && 
+                    $0.frame.width >= 640 && 
+                    $0.frame.height >= 360 
+                }
+                
+                if let bestVideo = videoCandidates.sorted(by: { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }).first {
+                    return .window(bestVideo)
+                }
+                
+                // Fallback to any on-screen window from the app
+                if let anyOnScreen = appWindows.first(where: { $0.isOnScreen }) {
+                    return .window(anyOnScreen)
+                }
+            }
+
+            // 3. Global Fallback: Prefer on-screen windows
+            let onScreen = candidates.filter { $0.isOnScreen }
+            guard let window = onScreen.first ?? candidates.first else {
                 throw ScreenCaptureServiceError.noShareableWindow
             }
             return .window(window)
@@ -178,7 +232,19 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             return filter
 
         case .window(let window):
-            return SCContentFilter(desktopIndependentWindow: window)
+            if #available(macOS 13.0, *) {
+                return SCContentFilter(desktopIndependentWindow: window)
+            } else {
+                // macOS 12.3: desktopIndependentWindow is not available.
+                // Fallback to display-based filter.
+                if let display = shareableContent.displays.first {
+                    return SCContentFilter(display: display, excludingWindows: [])
+                } else {
+                    // This should theoretically not happen if ScreenCaptureKit is working,
+                    // but we must return something.
+                    fatalError("No shareable displays found during filter creation on macOS 12")
+                }
+            }
         }
     }
 
@@ -245,17 +311,30 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             return
         }
 
+        var targetRect = CGRect(x: 0, y: 0, width: width, height: height)
+        if let trackedWindowID = self.trackedWindowID {
+            let options = CGWindowListOption(arrayLiteral: .optionIncludingWindow)
+            if let windowInfos = CGWindowListCopyWindowInfo(options, trackedWindowID) as? [[String: Any]],
+               let windowInfo = windowInfos.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == trackedWindowID }),
+               let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: Any],
+               let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) {
+                targetRect = bounds
+            }
+        } else if let trackedDisplayID = self.trackedDisplayID {
+            targetRect = CGDisplayBounds(trackedDisplayID)
+        }
+
         let frame = CapturedFrame(
             texture: metalTexture,
             timestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
             contentRect: CGRect(x: 0, y: 0, width: width, height: height),
+            targetRect: targetRect,
             motionHint: motionEstimator.estimate(for: pixelBuffer),
             backingTexture: wrappedTexture
         )
 
         onFrame?(frame)
     }
-
 }
 
 private final class GlobalMotionEstimator {

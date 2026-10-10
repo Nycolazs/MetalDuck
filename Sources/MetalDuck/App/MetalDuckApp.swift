@@ -9,7 +9,6 @@ enum MetalDuckApp {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         app.delegate = appDelegate
-        appDelegate.bootstrapIfNeeded()
         app.activate(ignoringOtherApps: true)
         app.run()
     }

@@ -1,19 +1,20 @@
 import CoreGraphics
+import Foundation
 
 enum CaptureTarget: Equatable {
     case automatic
-    case display(CGDirectDisplayID?)
+    case display(CGDirectDisplayID)
     case window(CGWindowID?)
 }
 
-struct CaptureConfiguration {
-    var framesPerSecond: Int = 30
-    var queueDepth: Int = 5
-    var showsCursor: Bool = false
+struct CaptureConfiguration: Codable, Equatable {
+    var framesPerSecond: Int
+    var queueDepth: Int
+    var showsCursor: Bool
     var preferredPixelSize: CGSize?
 
     init(
-        framesPerSecond: Int = 30,
+        framesPerSecond: Int = 60,
         queueDepth: Int = 5,
         showsCursor: Bool = false,
         preferredPixelSize: CGSize? = nil

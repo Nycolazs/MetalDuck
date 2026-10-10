@@ -1,0 +1,41 @@
+name: "🐛 Bug Report"
+description: "Report a bug to help us improve MetalDuck"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug!
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Open MetalDuck
+        2. Select 'Display 1'
+        3. Click 'Start'
+        4. Observe crash
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: What Mac model and macOS version are you using?
+      placeholder: e.g. MacBook Pro M2 Max, macOS 15.1
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Crash Reports
+      description: Please paste any relevant console logs or crash reports here.
+      render: shell

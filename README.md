@@ -1,119 +1,82 @@
-# MetalDuck
+<p align="center">
+  <img src="Sources/MetalDuck/Assets/AppIcon.png" width="128" height="128" alt="MetalDuck Logo">
+</p>
 
-MetalDuck is an experimental macOS real-time scaler inspired by Lossless Scaling, built with ScreenCaptureKit + Metal + MetalFX.
+<h1 align="center">MetalDuck</h1>
 
-It captures a window or display, applies GPU processing (upscaling and optional frame generation), and presents the processed result in a dedicated output window.
+<p align="center">
+  <strong>Lossless Scaling & Frame Generation for macOS / Apple Silicon</strong>
+</p>
 
-## What this project does
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  <img src="https://img.shields.io/badge/platform-macOS%2015%2B-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/version-v1.2.0-orange" alt="Version">
+</p>
 
-- Real-time capture with `ScreenCaptureKit`.
-- Metal render pipeline for low-latency presentation.
-- MetalFX spatial upscaling (`MTLFXSpatialScaler`).
-- Optional frame generation (`2x` / `3x`) with GPU optical-flow estimation + warping.
-- Runtime controls for capture FPS, target FPS, scaling, sharpness, dynamic resolution, and FG.
-- Live output HUD with `SOURCE / CAP / GEN / OUT FPS`.
+---
+🚀 MetalDuck Enhanced (Apple Silicon)
 
-## Current limitations (important)
+Improved version of MetalDuck with better UI, profiles, and performance optimizations for macOS gaming.
 
-- This is **not** a native game renderer injection path.
-- Quality can still differ from Lossless Scaling, especially in fast occlusion scenes.
-- Highest FG quality still requires true game motion vectors/depth from engine integration.
-- DRM-protected content may not be capturable by macOS APIs.
+MetalDuck is a professional-grade performance harness designed to bring high-fidelity upscaling and smooth frame generation to the macOS gaming and media ecosystem. By leveraging Apple Silicon's latest MetalFX capabilities and advanced optical-flow algorithms, MetalDuck enables "lossless scaling" and fluid motion on any window or display.
 
-## Requirements
+## 🚀 Improvements Over Original
 
-- Apple Silicon Mac
-- macOS 15+
-- Swift 6.2 toolchain (or compatible)
-- Xcode Command Line Tools
+This version of MetalDuck has been significantly refined into a standalone product with a focus on usability, stability, and pure performance:
 
-## Build
+- **✨ Redesigned UI**: A completely overhauled, compact control panel for efficient configuration.
+- **💾 Profile System**: Create, rename, and manage custom profiles tailored to specific games or apps.
+- **⌨️ Global Shortcuts**: Instantly toggle scaling and frame generation with system-wide hotkeys.
+- **🪄 Advanced Frame Generation**: Refined optical-flow algorithms for smoother interpolation with fewer artifacts.
+- **⚡ Performance First**: Optimized capture and rendering pipeline with lower overhead and improved stability.
 
-### Debug
+## ✨ Features
 
-```bash
-SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk swift build
-```
+- **Professional Upscaling**: Integrated MetalFX spatial upscaler for crystal-clear visuals at reduced processing costs.
+- **Next-Gen Frame Generation**: High-accuracy optical-flow engine to fluidly double or triple your perceivable framerate.
+- **Real-time Performance HUD**: Floating overlay with live `SOURCE`, `CAP`, `GEN`, and `OUT` FPS metrics.
+- **Dynamic Resolution Scaing (DRS)**: Automatically adjust quality to maintain targeted frame stability during intense scenes.
+- **Clean Installer**: Standard macOS DMG distribution for a native, seamless installation experience.
 
-### Release
+## 📦 Installation & Download
 
-```bash
-SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk swift build -c release
-```
+To get started with the latest stable version:
 
-## Run
+1. Visit the [**Releases**](https://github.com/S0N59/MetalDuck/releases) page.
+2. Download the latest `MetalDuck-x.x.x.dmg` file.
+3. Open the DMG and drag **MetalDuck** to your **Applications** folder.
 
-### Debug
+## 🛠 Usage
 
-```bash
-SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.4.sdk swift run
-```
+1. **Launch**: Open MetalDuck from your Applications folder.
+2. **Select Source**: Choose the window or display you wish to scale.
+3. **Configure**: Select your preferred Upscaling algorithm and Frame Generation mode.
+4. **Start**: Press the **Start** button or use the defined global shortcut to begin scaling.
+5. **Optimize**: Fine-tune settings or save them to a new **Profile** for future use.
 
-### Release binary
+## 🖼 Screenshots
 
-```bash
-./.build/release/MetalDuck
-```
+<p align="center">
+  <i>(Screenshot of the modern control panel and HUD coming soon)</i>
+</p>
 
-## Create a distributable release DMG
+## 🛠 Requirements
 
-```bash
-bash scripts/create_release.sh
-```
+- **Silicon**: Apple Silicon Mac (M1 or later)
+- **Software**: macOS 15.0 or later
+- **Permission**: Screen Recording permission is required for the capture engine to function.
 
-Output:
-- `dist/MetalDuck-macos-arm64.dmg`
+## 🤝 Contributing
 
-## Install from DMG
+Contributions are welcome! Whether you're fixing bugs, improving the FG algorithms, or refining the UI, please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
 
-1. Open `MetalDuck-macos-arm64.dmg`.
-2. Drag `MetalDuck.app` to `Applications`.
-3. Open `MetalDuck` from Launchpad or `/Applications`.
+## 📄 License
 
-## Quick start (30 -> 60 FPS browser test)
+This project is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
 
-1. Open a true 30 FPS video in your browser.
-2. In MetalDuck:
-   - Capture mode: `Window`
-   - Source: browser window
-   - Capture FPS: `30`
-   - Frame Generation: `On`
-   - FG mode: `2x`
-   - Target FPS: `60`
-3. Click `Scale`.
-4. Keep source window visible (browser may throttle hidden tabs/windows).
-5. Confirm in output HUD:
-   - `SOURCE` around 30
-   - `CAP` around 30
-   - `GEN` > 0
-   - `OUT` around 60
+---
 
-## Controls that most affect results
-
-- `Capture FPS`: input cadence.
-- `Target FPS`: output cadence cap.
-- `Frame Generation`: inserts generated frames.
-- `Scale` + `Match Output`: controls final processed resolution.
-- `Dynamic Resolution`: trades detail for frame stability.
-
-## Repository layout
-
-- `Sources/MetalDuck/App` app lifecycle, control UI, output window.
-- `Sources/MetalDuck/Capture` ScreenCaptureKit integration.
-- `Sources/MetalDuck/Rendering` main render loop and presentation.
-- `Sources/MetalDuck/Upscaling` MetalFX spatial upscaler wrapper.
-- `Sources/MetalDuck/FrameGeneration` optical-flow FG engine.
-- `docs/` architecture, usage, troubleshooting.
-
-## Documentation
-
-- `docs/ARCHITECTURE.md`
-- `docs/USAGE.md`
-- `docs/FRAME_GENERATION.md`
-- `docs/TROUBLESHOOTING.md`
-- `docs/ROADMAP.md`
-- `docs/RELEASE.md`
-
-## License
-
-MIT (`LICENSE`).
+<p align="center">
+  Made with ❤️ for the macOS community.
+</p>

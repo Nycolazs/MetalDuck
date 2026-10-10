@@ -39,12 +39,24 @@ final class ScalingOverlayController {
     }
 
     func hide() {
-        if outputWindow?.isVisible == false {
-            outputWindow?.orderFrontRegardless()
-        }
         outputViewController.setProcessingState(isRunning: false)
+        // Simply ordering out is safer than toggling fullscreen during a transition
+        outputWindow?.orderOut(nil)
     }
 
+    func updateFrame(to rect: CGRect) {
+        // Run on next runloop to allow window constraints to settle if it just appeared
+        DispatchQueue.main.async {
+            var cocoaRect = rect
+            if let primaryScreen = NSScreen.screens.first {
+                cocoaRect.origin.y = primaryScreen.frame.height - rect.maxY
+            }
+            // Add a small safety to prevent impossible sizing from causing errors
+            cocoaRect.size.width = max(1.0, cocoaRect.size.width)
+            cocoaRect.size.height = max(1.0, cocoaRect.size.height)
+            self.outputWindow?.setFrame(cocoaRect, display: true, animate: false)
+        }
+    }
     func updateStats(_ stats: RendererStats) {
         outputViewController.updateStats(stats)
     }
@@ -64,16 +76,19 @@ final class ScalingOverlayController {
 
         let window = NSWindow(
             contentRect: Self.defaultOutputFrame(for: screen),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false,
             screen: screen
         )
-        window.title = "MetalDuck Output"
-        window.minSize = NSSize(width: 640, height: 360)
+        window.title = "MetalDuck Overlay"
+        // Ensure it can be perfectly sized to the source without arbitrary limits
+        window.minSize = NSSize(width: 100, height: 100) 
         window.isOpaque = false
-        window.backgroundColor = NSColor.black
-        window.collectionBehavior = [.fullScreenPrimary]
+        window.backgroundColor = NSColor.clear
+        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .transient, .stationary, .fullScreenAuxiliary]
+        window.level = .screenSaver
+        window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false
         window.contentViewController = outputViewController
         outputViewController.updateColorSpace(screen.colorSpace?.cgColorSpace)
