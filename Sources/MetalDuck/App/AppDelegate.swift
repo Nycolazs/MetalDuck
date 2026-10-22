@@ -21,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.applicationIconImage = MetalDuckIcon.make()
 
             let metalContext = try MetalContext()
+            PipelineLog.shared.event(
+                "session",
+                "launch device=\(metalContext.device.name) log=\(PipelineLog.shared.fileURL?.path ?? "memory only")"
+            )
             let captureConfiguration = CaptureConfiguration(
                 framesPerSecond: 30,
                 queueDepth: 5,
@@ -30,15 +34,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let initialTarget: CaptureTarget = .window(nil)
 
             let controlWindow = NSWindow(
-                contentRect: NSRect(x: 80, y: 90, width: 1360, height: 860),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                contentRect: NSRect(x: 80, y: 90, width: 1180, height: 880),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )
 
-            controlWindow.minSize = NSSize(width: 1080, height: 760)
+            controlWindow.minSize = NSSize(width: 1040, height: 400)
             controlWindow.isReleasedWhenClosed = false
-            controlWindow.setContentSize(NSSize(width: 1360, height: 860))
+            controlWindow.titlebarAppearsTransparent = true
+            controlWindow.titleVisibility = .hidden
+            controlWindow.isMovableByWindowBackground = true
+            controlWindow.isOpaque = false
+            controlWindow.backgroundColor = .clear
             controlWindow.title = "MetalDuck"
 
             let overlayController = ScalingOverlayController(device: metalContext.device, controlWindow: controlWindow)
@@ -57,6 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             )
 
             controlWindow.contentViewController = viewController
+            // The panel's constraints fix the height, so size to fit instead of guessing.
+            viewController.view.layoutSubtreeIfNeeded()
+            let fitting = viewController.view.fittingSize.height
+            controlWindow.setContentSize(NSSize(width: 1180, height: fitting))
+            controlWindow.center()
 
             controlWindow.makeKeyAndOrderFront(nil)
             NSApplication.shared.activate(ignoringOtherApps: true)

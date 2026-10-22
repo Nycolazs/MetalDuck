@@ -20,13 +20,21 @@ enum MetalDuckIcon {
         return image
     }
 
+    /// Silver glass mark for the window title. Not the saturated app icon.
+    static func glassMark() -> NSImage {
+        loadBundled(named: "GlassMark", size: 128) ?? make(size: 128)
+    }
+
     private static func loadBundledIcon(size: CGFloat) -> NSImage? {
+        loadBundled(named: "AppIcon", size: size)
+    }
+
+    private static func loadBundled(named resourceName: String, size: CGFloat) -> NSImage? {
         guard let bundle = Bundle.safeModule else {
             return nil
         }
 
         // SPM flattens the Assets directory in the final bundle.
-        let resourceName = "AppIcon"
         let resourceExtension = "png"
 
         let iconURL = bundle.url(forResource: resourceName, withExtension: resourceExtension)

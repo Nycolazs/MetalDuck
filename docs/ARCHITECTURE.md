@@ -33,10 +33,10 @@
 
 ## Frame generation model
 
-- Source frames are staged as `previous` and `current` textures.
-- A compute pass estimates low-resolution optical flow between frames.
-- A render pass warps both frames toward the interpolation time and blends them.
-- If FG path fails, renderer falls back to blend interpolation to avoid stalls.
+- Captures are copied into a small timestamped ring.
+- `VisionFlowProvider` asks Vision for forward and backward optical flow for that exact pair.
+- Output runs a little behind capture. `flowInterpolate` warps both frames to the displayed moment and falls back to a blend where the vectors disagree.
+- The full description is in the README and in `docs/FRAME_GENERATION.md`.
 
 ## Telemetry
 

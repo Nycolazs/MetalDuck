@@ -1,57 +1,13 @@
 # Usage
 
-## Start a session
+The current walkthrough, with a picture of the window, is in the [README](../README.md#using-it).
 
-1. Launch MetalDuck.
-2. Grant Screen Recording permission if prompted.
-3. Click `Refresh` to load capture targets.
-4. Select mode/source and press `Scale`.
+Short version:
 
-## Capture modes
+1. Launch MetalDuck and allow Screen Recording.
+2. Pick a profile, or set capture, frame generation, and scaling yourself.
+3. Choose a display or a window.
+4. Press Start. The overlay follows the source and ignores clicks.
+5. Stop from the button, the menu-bar icon, or the stop shortcut. Control-Option-Command-Escape always stops it.
 
-- `Automatic`: picks a valid source automatically.
-- `Display`: capture an entire monitor.
-- `Window`: capture one specific app window.
-
-## Output behavior
-
-- A separate output window opens and shows processed content.
-- The output window is resizable and supports macOS fullscreen.
-- The HUD displays live processing metrics.
-
-## HUD metrics
-
-- `SOURCE FPS`: source feed cadence.
-- `CAP FPS`: captured frames per second.
-- `GEN FPS`: generated frames per second.
-- `OUT FPS`: output presentation FPS.
-- `INPUT -> OUTPUT`: processed resolution mapping.
-
-## Recommended presets
-
-- `Performance`: lowest latency, minimal processing.
-- `Balanced`: default for 30->60 workflow.
-- `Quality`: stronger upscale / heavier processing.
-
-## Validation scenarios
-
-### A) Upscaling check
-
-1. Disable FG.
-2. Increase `Scale`.
-3. Confirm HUD output resolution increases.
-
-### B) 30 -> 60 check
-
-1. Use a real 30 FPS source.
-2. Set `Capture FPS = 30`, `FG = On`, `Mode = 2x`, `Target FPS = 60`.
-3. Confirm `GEN FPS > 0` and `OUT` around 60.
-
-### C) Baseline check
-
-1. Disable FG.
-2. Confirm output remains smooth and close to source cadence.
-
-## Shortcut
-
-- `Space`: start/stop session.
+Capture, Output, and Generated in the top row are the live rates. The built-in profiles are Games (60 fps, 2×), Anime (30 fps cap, 4×), and Video (30 fps cap, 2×).

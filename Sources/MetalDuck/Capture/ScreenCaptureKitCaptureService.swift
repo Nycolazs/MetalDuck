@@ -4,7 +4,6 @@ import CoreVideo
 import Foundation
 import Metal
 @preconcurrency import ScreenCaptureKit
-import simd
 
 enum CaptureStaleError: LocalizedError {
     case framesStalled
@@ -39,9 +38,10 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
     private var trackedBundleID: String?
     private var trackedDisplayID: CGDirectDisplayID?
     
-    private let motionEstimator = GlobalMotionEstimator()
     private var staleTimer: DispatchSourceTimer?
     private let staleTimeout: TimeInterval = 3.0
+    private var lastSampleUptime: TimeInterval = 0
+    private var lastAcceptedTimestamp: Double = 0
 
     init(context: MetalContext, target: CaptureTarget, configuration: CaptureConfiguration) {
         self.context = context
@@ -53,8 +53,6 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         if stream != nil {
             await stop()
         }
-        motionEstimator.reset()
-
         let shareableContent = try await SCShareableContent.current
         let selection = try resolveSelection(in: shareableContent)
         let filter = makeFilter(for: selection, shareableContent: shareableContent)
@@ -77,7 +75,12 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         streamConfiguration.pixelFormat = kCVPixelFormatType_32BGRA
         streamConfiguration.scalesToFit = true
         streamConfiguration.showsCursor = captureConfiguration.showsCursor
-        streamConfiguration.queueDepth = 8 
+        // ScreenCaptureKit rejects fewer than three surfaces.
+        streamConfiguration.queueDepth = min(max(captureConfiguration.queueDepth, 3), 8)
+        // Sample at the display's own rate so each frame carries the time its content really
+        // changed. A 30 fps cap here snaps 24 fps video onto a 33 ms grid (33, 33, 33, 67 ms),
+        // which frame generation turns into uneven motion. The configured rate is applied
+        // below by timestamp instead.
         streamConfiguration.minimumFrameInterval = .zero
         
         if #available(macOS 15.0, *) {
@@ -111,6 +114,15 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
 
         self.stream = stream
+        lastSampleUptime = 0
+        lastAcceptedTimestamp = 0
+        PipelineLog.shared.logCaptureStarted(
+            target: Self.describe(selection),
+            pixelWidth: captureSize.width,
+            pixelHeight: captureSize.height,
+            configuredFPS: captureConfiguration.framesPerSecond,
+            configuredQueueDepth: captureConfiguration.queueDepth
+        )
     }
 
     func stop() async {
@@ -127,7 +139,8 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             }
         }
 
-        motionEstimator.reset()
+        lastSampleUptime = 0
+        PipelineLog.shared.event("capture", "stream stopped")
     }
 
     func reconfigure(target: CaptureTarget) async throws {
@@ -284,10 +297,22 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
     }
 
     private func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
-        guard CMSampleBufferIsValid(sampleBuffer),
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+        guard CMSampleBufferIsValid(sampleBuffer) else {
+            PipelineLog.shared.noteCaptureDrop("invalid sample buffer")
             return
         }
+        // Idle and blank samples only say the content has not changed.
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // Keep frames no closer than the configured rate allows. The tolerance lets content
+        // slightly slower than the cap (24 fps under 30) through untouched.
+        let timestamp = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        let minimumSpacing = 0.75 / Double(max(captureConfiguration.framesPerSecond, 1))
+        if timestamp.isFinite, lastAcceptedTimestamp > 0,
+           timestamp > lastAcceptedTimestamp, timestamp - lastAcceptedTimestamp < minimumSpacing {
+            return
+        }
+        lastAcceptedTimestamp = timestamp
 
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
@@ -308,6 +333,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         guard cacheStatus == kCVReturnSuccess,
               let wrappedTexture,
               let metalTexture = CVMetalTextureGetTexture(wrappedTexture) else {
+            PipelineLog.shared.noteCaptureDrop("could not wrap pixel buffer as a Metal texture (status \(cacheStatus))")
             return
         }
 
@@ -329,139 +355,31 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             timestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
             contentRect: CGRect(x: 0, y: 0, width: width, height: height),
             targetRect: targetRect,
-            motionHint: motionEstimator.estimate(for: pixelBuffer),
             backingTexture: wrappedTexture
+        )
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let interval = lastSampleUptime > 0 ? now - lastSampleUptime : 0
+        lastSampleUptime = now
+        PipelineLog.shared.noteCapture(
+            width: width,
+            height: height,
+            interval: interval,
+            timestamp: CMTimeGetSeconds(frame.timestamp)
         )
 
         onFrame?(frame)
     }
-}
 
-private final class GlobalMotionEstimator {
-    private static let sampleWidth = 32
-    private static let sampleHeight = 18
-    private static let maxShift = 2
-
-    private var previousGrid: [UInt8]?
-    private var smoothedMotion: SIMD2<Float> = .zero
-    private var frameCounter: UInt64 = 0
-
-    func reset() {
-        previousGrid = nil
-        smoothedMotion = .zero
-        frameCounter = 0
-    }
-
-    func estimate(for pixelBuffer: CVPixelBuffer) -> SIMD2<Float> {
-        frameCounter &+= 1
-
-        let width = max(1, CVPixelBufferGetWidth(pixelBuffer))
-        let height = max(1, CVPixelBufferGetHeight(pixelBuffer))
-
-        guard let currentGrid = makeLumaGrid(from: pixelBuffer) else {
-            return .zero
+    private static func describe(_ selection: Selection) -> String {
+        switch selection {
+        case .display(let display):
+            return "display \(display.displayID) \(display.width)x\(display.height)"
+        case .window(let window):
+            let owner = window.owningApplication?.applicationName ?? "unknown app"
+            let title = window.title ?? ""
+            return "window \(window.windowID) \(owner) \"\(title)\" \(Int(window.frame.width))x\(Int(window.frame.height))"
         }
-
-        defer {
-            previousGrid = currentGrid
-        }
-
-        guard let previousGrid else {
-            return .zero
-        }
-
-        // Re-estimate every third frame to keep capture callback lightweight.
-        if frameCounter % 3 != 0 {
-            return smoothedMotion
-        }
-
-        let bestShift = bestShiftBetween(previous: previousGrid, current: currentGrid)
-        let scaleX = Float(width) / Float(Self.sampleWidth)
-        let scaleY = Float(height) / Float(Self.sampleHeight)
-
-        let rawMotion = SIMD2<Float>(Float(bestShift.dx) * scaleX, Float(bestShift.dy) * scaleY)
-        smoothedMotion = (smoothedMotion * 0.7) + (rawMotion * 0.3)
-        return smoothedMotion
-    }
-
-    private func makeLumaGrid(from pixelBuffer: CVPixelBuffer) -> [UInt8]? {
-        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-            return nil
-        }
-
-        let width = max(1, CVPixelBufferGetWidth(pixelBuffer))
-        let height = max(1, CVPixelBufferGetHeight(pixelBuffer))
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-
-        let sampleWidth = Self.sampleWidth
-        let sampleHeight = Self.sampleHeight
-        var grid = [UInt8](repeating: 0, count: sampleWidth * sampleHeight)
-
-        for sy in 0..<sampleHeight {
-            let y = min(height - 1, (sy * height) / sampleHeight)
-            let rowPtr = baseAddress.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt8.self)
-
-            for sx in 0..<sampleWidth {
-                let x = min(width - 1, (sx * width) / sampleWidth)
-                let pixel = rowPtr.advanced(by: x * 4)
-
-                // BGRA to luma approximation.
-                let b = Int(pixel[0])
-                let g = Int(pixel[1])
-                let r = Int(pixel[2])
-                let luma = (29 * b + 150 * g + 77 * r) >> 8
-                grid[(sy * sampleWidth) + sx] = UInt8(clamping: luma)
-            }
-        }
-
-        return grid
-    }
-
-    private func bestShiftBetween(previous: [UInt8], current: [UInt8]) -> (dx: Int, dy: Int) {
-        let sampleWidth = Self.sampleWidth
-        let sampleHeight = Self.sampleHeight
-        let maxShift = Self.maxShift
-
-        var bestDX = 0
-        var bestDY = 0
-        var bestError: UInt64 = .max
-
-        for dy in (-maxShift)...maxShift {
-            for dx in (-maxShift)...maxShift {
-                let xStart = max(0, -dx)
-                let xEnd = min(sampleWidth, sampleWidth - dx)
-                let yStart = max(0, -dy)
-                let yEnd = min(sampleHeight, sampleHeight - dy)
-
-                guard xStart < xEnd, yStart < yEnd else {
-                    continue
-                }
-
-                var error: UInt64 = 0
-
-                for y in yStart..<yEnd {
-                    let prevBase = y * sampleWidth
-                    let currBase = (y + dy) * sampleWidth
-
-                    for x in xStart..<xEnd {
-                        let prevValue = Int(previous[prevBase + x])
-                        let currValue = Int(current[currBase + x + dx])
-                        error &+= UInt64(abs(prevValue - currValue))
-                    }
-                }
-
-                if error < bestError {
-                    bestError = error
-                    bestDX = dx
-                    bestDY = dy
-                }
-            }
-        }
-
-        return (bestDX, bestDY)
     }
 }
 

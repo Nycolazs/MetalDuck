@@ -2,285 +2,329 @@ import Foundation
 @preconcurrency import Metal
 import Vision
 @preconcurrency import CoreVideo
+import QuartzCore
 import os
 import MetalPerformanceShaders
 
-/// Async optical flow provider using Apple's Vision framework.
-/// Runs VNGenerateOpticalFlowRequest on the ANE/GPU via a dedicated queue.
-/// The frame pipeline submits frame pairs and queries the latest available result.
-/// Async optical flow provider leveraging Apple's Vision framework (VNGenerateOpticalFlowRequest).
-/// Computes motion vectors on the ANE or GPU to enable accurate frame interpolation.
+/// Optical flow from Vision for the frame-generation pass.
+///
+/// Captures are downscaled on the GPU straight into IOSurface pixel buffers, so Vision reads them
+/// without a CPU copy, and its output is wrapped as a Metal texture the same way.
+///
+/// Revision 1 of `VNGenerateOpticalFlowRequest` is chosen on purpose. On Apple silicon it takes
+/// about 15 ms at 800 px and reports vectors in pixels. Revision 2 takes 55–85 ms and reports
+/// them at a fraction of a pixel that changes with size and accuracy.
 final class VisionFlowProvider: @unchecked Sendable {
-    private let device: MTLDevice
-    private let commandQueue: MTLCommandQueue
-    private let flowQueue = DispatchQueue(label: "com.metalduck.visionflow", qos: .userInitiated)
-    private var textureCache: CVMetalTextureCache?
-    private let scaler: MPSImageBilinearScale
+    /// One capture, downscaled for Vision.
+    struct FlowFrame: @unchecked Sendable {
+        let pixelBuffer: CVPixelBuffer
+        fileprivate let metalTexture: CVMetalTexture
+        let id: UInt64
+        let time: CFTimeInterval
+    }
 
-    // Latest computed flow pair (protected by lock)
-    private var lock = os_unfair_lock()
-    private var _forwardFlow: MTLTexture?
-    private var _backwardFlow: MTLTexture?
-    private var _flowFrameID: UInt64 = 0
-    private var isComputing = false
-    private var totalSubmitted: UInt64 = 0
-    private var totalCompleted: UInt64 = 0
-    private var totalFailed: UInt64 = 0
-    private var latestFlowCallCount: UInt64 = 0
-
-    struct FlowResult {
+    /// Vectors between two captures, in pixels of the flow texture once multiplied by `gain`.
+    struct FlowResult: @unchecked Sendable {
         let forward: MTLTexture
         let backward: MTLTexture
-        let frameID: UInt64
+        let gain: Float
+        let previousID: UInt64
+        let nextID: UInt64
+        fileprivate let backing: [AnyObject]
     }
+
+    static let maxDimension = 800.0
+    private static let maxInFlight = 2
+    private static let keptResults = 6
+
+    private let device: MTLDevice
+    private let flowQueue = DispatchQueue(label: "com.metalduck.visionflow", qos: .userInteractive, attributes: .concurrent)
+    private var textureCache: CVMetalTextureCache?
+    private let scaler: MPSImageBilinearScale
+    private let revision: Int
+    private let gain: Float
+
+    // Render thread only.
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var poolWidth = 0
+    private var poolHeight = 0
+
+    private var lock = os_unfair_lock()
+    private var results: [FlowResult] = []
+    private var inFlight = 0
+    private var pending: (FlowFrame, FlowFrame)?
+    private var generation: UInt64 = 0
+    private var readyLatency: Double = 0.03
 
     init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         self.device = device
-        self.commandQueue = commandQueue
         self.scaler = MPSImageBilinearScale(device: device)
 
-        // Setup texture cache for zero-copy CVPixelBuffer to MTLTexture conversions
+        if VNGenerateOpticalFlowRequest.supportedRevisions.contains(VNGenerateOpticalFlowRequestRevision1) {
+            revision = VNGenerateOpticalFlowRequestRevision1
+            gain = 1
+        } else {
+            revision = VNGenerateOpticalFlowRequest.defaultRevision
+            // Revision 2 at .high and 800 px reports roughly 0.38 of the real displacement.
+            gain = 2.6
+        }
+
         let status = CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
         if status != kCVReturnSuccess {
-            NSLog("VisionFlowProvider: Error creating texture cache (status = %d)", status)
+            PipelineLog.shared.event("generate", "Vision flow texture cache failed, status \(status)")
+        } else {
+            PipelineLog.shared.event(
+                "generate",
+                "Vision optical flow ready on \(device.name): revision \(revision), up to \(Int(Self.maxDimension)) px, forward and backward in parallel, \(Self.maxInFlight) pairs in flight. Frames reach Vision through IOSurface without a CPU copy."
+            )
         }
-        
-        NSLog("VisionFlowProvider: Initialized with device %@", device.name)
     }
 
-    /// Returns the latest computed flow pair, or nil if not yet available.
-    func latestFlow() -> FlowResult? {
+    /// Average time from a capture's timestamp to its flow being usable.
+    var flowReadyLatency: Double {
         os_unfair_lock_lock(&lock)
-        latestFlowCallCount += 1
-        let callNum = latestFlowCallCount
-        let hasFwd = _forwardFlow != nil
-        let hasBwd = _backwardFlow != nil
-        let fid = _flowFrameID
-        guard let fwd = _forwardFlow, let bwd = _backwardFlow else {
+        defer { os_unfair_lock_unlock(&lock) }
+        return readyLatency
+    }
+
+    /// Flow computed for exactly this pair of captures.
+    func flow(previousID: UInt64, nextID: UInt64) -> FlowResult? {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return results.last { $0.previousID == previousID && $0.nextID == nextID }
+    }
+
+    /// The finished flow whose pair is closest to `nextID`.
+    func nearestFlow(to nextID: UInt64) -> FlowResult? {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        return results.min {
+            distance($0.nextID, nextID) < distance($1.nextID, nextID)
+        }
+    }
+
+    /// Downscales `texture` into a Vision-ready buffer as part of `commandBuffer`.
+    /// The buffer holds valid pixels once the command buffer completes.
+    func encodeFlowFrame(
+        from texture: MTLTexture,
+        id: UInt64,
+        time: CFTimeInterval,
+        commandBuffer: MTLCommandBuffer
+    ) -> FlowFrame? {
+        let scale = min(1.0, Self.maxDimension / Double(max(texture.width, texture.height)))
+        let width = max(2, Int((Double(texture.width) * scale).rounded()) & ~1)
+        let height = max(2, Int((Double(texture.height) * scale).rounded()) & ~1)
+
+        guard let cache = textureCache, let pool = pool(width: width, height: height) else { return nil }
+
+        var pixelBuffer: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer) == kCVReturnSuccess,
+              let pixelBuffer else { return nil }
+
+        let attributes = [kCVMetalTextureUsage as String: MTLTextureUsage([.shaderRead, .shaderWrite]).rawValue] as CFDictionary
+        var cvTexture: CVMetalTexture?
+        guard CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault, cache, pixelBuffer, attributes, .bgra8Unorm, width, height, 0, &cvTexture
+        ) == kCVReturnSuccess,
+              let cvTexture,
+              let target = CVMetalTextureGetTexture(cvTexture) else { return nil }
+
+        scaler.encode(commandBuffer: commandBuffer, sourceTexture: texture, destinationTexture: target)
+        let frame = FlowFrame(pixelBuffer: pixelBuffer, metalTexture: cvTexture, id: id, time: time)
+        commandBuffer.addCompletedHandler { _ in
+            withExtendedLifetime(frame) {}
+        }
+        return frame
+    }
+
+    /// Starts flow for a pair whose pixels are already on the GPU.
+    /// When Vision is saturated, the newest waiting pair replaces an older one.
+    func submit(previous: FlowFrame, next: FlowFrame) {
+        os_unfair_lock_lock(&lock)
+        guard inFlight < Self.maxInFlight else {
+            let replaced = pending != nil
+            pending = (previous, next)
             os_unfair_lock_unlock(&lock)
-            if callNum % 120 == 1 {  // Log every 120th call (~1 per second at 120Hz)
-                NSLog("VisionFlowProvider: latestFlow() -> nil (hasFwd=%d hasBwd=%d frameID=%llu call#%llu)",
-                      hasFwd ? 1 : 0, hasBwd ? 1 : 0, fid, callNum)
+            if replaced {
+                PipelineLog.shared.noteFlowSkippedBusy()
             }
-            return nil
-        }
-        os_unfair_lock_unlock(&lock)
-        if callNum % 120 == 1 {
-            NSLog("VisionFlowProvider: latestFlow() -> VALID (fwd=%dx%d bwd=%dx%d frameID=%llu)",
-                  fwd.width, fwd.height, bwd.width, bwd.height, fid)
-        }
-        return FlowResult(forward: fwd, backward: bwd, frameID: fid)
-    }
-
-    /// Submit a frame pair for async flow computation (non-blocking).
-    func submitFlowRequest(prev: MTLTexture, next: MTLTexture, frameID: UInt64) {
-        os_unfair_lock_lock(&lock)
-        let alreadyComputing = isComputing
-        if !alreadyComputing {
-            isComputing = true
-        }
-        totalSubmitted += 1
-        let submitted = totalSubmitted
-        os_unfair_lock_unlock(&lock)
-
-        // Skip if already computing — we'll pick up the next frame
-        if alreadyComputing {
             return
         }
+        inFlight += 1
+        let generation = generation
+        os_unfair_lock_unlock(&lock)
 
-        NSLog("VisionFlowProvider: Starting flow #%llu (prev=%dx%d next=%dx%d)",
-              submitted, prev.width, prev.height, next.width, next.height)
-
-        // Create pixel buffers and copy texture data to them using a managed texture readback
-        let width = prev.width
-        let height = prev.height
-
-        // Run Vision flow async on dedicated queue
-        flowQueue.async { [weak self] in
-            guard let self = self else { return }
-            defer {
-                os_unfair_lock_lock(&self.lock)
-                self.isComputing = false
-                os_unfair_lock_unlock(&self.lock)
-            }
-
-            guard let prevPB = self.readTextureToPixelBuffer(prev),
-                  let nextPB = self.readTextureToPixelBuffer(next) else {
-                NSLog("VisionFlowProvider: FAILED to read textures to pixel buffers")
-                os_unfair_lock_lock(&self.lock)
-                self.totalFailed += 1
-                os_unfair_lock_unlock(&self.lock)
-                return
-            }
-
-            NSLog("VisionFlowProvider: Pixel buffers created (%dx%d), dispatching Vision flow", width, height)
-
-            // Forward flow: prev → next
-            let forwardFlow = self.runVisionFlow(source: prevPB, target: nextPB, width: width, height: height)
-            // Backward flow: next → prev
-            let backwardFlow = self.runVisionFlow(source: nextPB, target: prevPB, width: width, height: height)
-
-            guard let fwd = forwardFlow, let bwd = backwardFlow else {
-                os_unfair_lock_lock(&self.lock)
-                self.totalFailed += 1
-                let failed = self.totalFailed
-                os_unfair_lock_unlock(&self.lock)
-                NSLog("VisionFlowProvider: Flow computation FAILED (total failures: %llu)", failed)
-                return
-            }
-
-            // Store results
-            os_unfair_lock_lock(&self.lock)
-            self._forwardFlow = fwd
-            self._backwardFlow = bwd
-            self._flowFrameID = frameID
-            self.totalCompleted += 1
-            let completed = self.totalCompleted
-            os_unfair_lock_unlock(&self.lock)
-            NSLog("VisionFlowProvider: Flow #%llu COMPLETED (fwd=%dx%d bwd=%dx%d, total completed: %llu)",
-                  frameID, fwd.width, fwd.height, bwd.width, bwd.height, completed)
-        }
+        start(previous: previous, next: next, generation: generation)
     }
 
     func reset() {
         os_unfair_lock_lock(&lock)
-        _forwardFlow = nil
-        _backwardFlow = nil
-        _flowFrameID = 0
+        results.removeAll()
+        pending = nil
+        generation &+= 1
         os_unfair_lock_unlock(&lock)
     }
 
     // MARK: - Private
 
-    /// Reads a GPU texture to a CVPixelBuffer using a managed intermediate texture.
-    /// This works correctly even with `.private` storage mode textures from ScreenCaptureKit.
-    private func readTextureToPixelBuffer(_ texture: MTLTexture) -> CVPixelBuffer? {
-        // Increased from 640 to 1280 to handle large displacements in 24fps Anime
-        let maxDimension = 1280.0
-        let scale = min(1.0, maxDimension / Double(max(texture.width, texture.height)))
-        let width = max(1, Int(Double(texture.width) * scale))
-        let height = max(1, Int(Double(texture.height) * scale))
+    private func start(previous: FlowFrame, next: FlowFrame, generation: UInt64) {
+        PipelineLog.shared.noteFlowStarted()
+        flowQueue.async { [weak self] in
+            guard let self else { return }
+            let started = CACurrentMediaTime()
+            let outcome = self.computePair(previous: previous, next: next)
+            let finished = CACurrentMediaTime()
+            let milliseconds = (finished - started) * 1000
 
-        // Create a managed (CPU-accessible) intermediate texture
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false
-        )
-        desc.usage = [.shaderRead, .shaderWrite]
-        #if os(macOS)
-        desc.storageMode = .managed
-        #else
-        desc.storageMode = .shared
-        #endif
+            os_unfair_lock_lock(&self.lock)
+            var following: (FlowFrame, FlowFrame)?
+            if generation == self.generation {
+                if case .success(let result) = outcome {
+                    self.results.append(result)
+                    if self.results.count > Self.keptResults {
+                        self.results.removeFirst(self.results.count - Self.keptResults)
+                    }
+                    let latency = finished - next.time
+                    if latency > 0, latency < 0.5 {
+                        self.readyLatency = self.readyLatency * 0.85 + latency * 0.15
+                    }
+                }
+                following = self.pending
+                self.pending = nil
+            }
+            if following == nil {
+                self.inFlight -= 1
+            }
+            let currentGeneration = self.generation
+            os_unfair_lock_unlock(&self.lock)
 
-        guard let managedTex = device.makeTexture(descriptor: desc),
-              let cmdBuf = commandQueue.makeCommandBuffer() else {
-            NSLog("VisionFlowProvider: Failed to create managed texture or command buffer")
-            return nil
+            switch outcome {
+            case .success(let result):
+                PipelineLog.shared.noteFlowFinished(
+                    milliseconds: milliseconds,
+                    width: result.forward.width,
+                    height: result.forward.height
+                )
+            case .failure(let error):
+                PipelineLog.shared.noteFlowFailed(milliseconds: milliseconds, reason: error.reason)
+            }
+
+            if let following {
+                self.start(previous: following.0, next: following.1, generation: currentGeneration)
+            }
         }
-
-        // Scale and copy from private GPU texture to managed texture directly on GPU
-        scaler.encode(commandBuffer: cmdBuf, sourceTexture: texture, destinationTexture: managedTex)
-
-        #if os(macOS)
-        guard let blit = cmdBuf.makeBlitCommandEncoder() else { return nil }
-        blit.synchronize(resource: managedTex)
-        blit.endEncoding()
-        #endif
-
-        cmdBuf.commit()
-        cmdBuf.waitUntilCompleted()
-
-        // Now read managed texture data into a CVPixelBuffer
-        guard let pb = createPixelBuffer(width: width, height: height) else {
-            NSLog("VisionFlowProvider: Failed to create CVPixelBuffer")
-            return nil
-        }
-
-        CVPixelBufferLockBaseAddress(pb, [])
-        defer { CVPixelBufferUnlockBaseAddress(pb, []) }
-
-        guard let baseAddress = CVPixelBufferGetBaseAddress(pb) else {
-            NSLog("VisionFlowProvider: Failed to get pixel buffer base address")
-            return nil
-        }
-
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
-        managedTex.getBytes(baseAddress, bytesPerRow: bytesPerRow,
-                           from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                                           size: MTLSize(width: width, height: height, depth: 1)),
-                           mipmapLevel: 0)
-
-        return pb
     }
 
-    private func runVisionFlow(source: CVPixelBuffer, target: CVPixelBuffer,
-                               width: Int, height: Int) -> MTLTexture? {
+    private struct FlowFailure: Error {
+        let reason: String
+    }
+
+    private final class PairSlots: @unchecked Sendable {
+        var forward: (MTLTexture, [AnyObject])?
+        var backward: (MTLTexture, [AnyObject])?
+        var failure: String?
+    }
+
+    private func computePair(previous: FlowFrame, next: FlowFrame) -> Result<FlowResult, FlowFailure> {
+        let slots = PairSlots()
+        DispatchQueue.concurrentPerform(iterations: 2) { index in
+            let isForward = index == 0
+            let outcome = runVision(
+                source: isForward ? previous.pixelBuffer : next.pixelBuffer,
+                target: isForward ? next.pixelBuffer : previous.pixelBuffer
+            )
+            switch outcome {
+            case .success(let flow):
+                if isForward { slots.forward = flow } else { slots.backward = flow }
+            case .failure(let error):
+                slots.failure = error.reason
+            }
+        }
+
+        guard let forward = slots.forward, let backward = slots.backward else {
+            return .failure(FlowFailure(reason: slots.failure ?? "VNGenerateOpticalFlowRequest returned no vectors"))
+        }
+        return .success(FlowResult(
+            forward: forward.0,
+            backward: backward.0,
+            gain: gain,
+            previousID: previous.id,
+            nextID: next.id,
+            backing: forward.1 + backward.1
+        ))
+    }
+
+    private func runVision(source: CVPixelBuffer, target: CVPixelBuffer) -> Result<(MTLTexture, [AnyObject]), FlowFailure> {
         let request = VNGenerateOpticalFlowRequest(targetedCVPixelBuffer: target)
-        // Upgraded to .high to better track large pixel displacements (e.g. low FPS anime)
+        request.revision = revision
         request.computationAccuracy = .high
         request.outputPixelFormat = kCVPixelFormatType_TwoComponent16Half
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: source, options: [:])
         do {
-            try handler.perform([request])
+            try VNImageRequestHandler(cvPixelBuffer: source, options: [:]).perform([request])
         } catch {
-            NSLog("VisionFlowProvider: Vision optical flow EXCEPTION: %@", error.localizedDescription)
-            return nil
+            return .failure(FlowFailure(reason: error.localizedDescription))
+        }
+        guard let flowBuffer = request.results?.first?.pixelBuffer else {
+            return .failure(FlowFailure(reason: "VNGenerateOpticalFlowRequest returned no vectors"))
         }
 
-        guard let observation = request.results?.first as? VNPixelBufferObservation else {
-            NSLog("VisionFlowProvider: Vision returned NO observation results")
-            return nil
+        let width = CVPixelBufferGetWidth(flowBuffer)
+        let height = CVPixelBufferGetHeight(flowBuffer)
+
+        if let cache = textureCache, CVPixelBufferGetIOSurface(flowBuffer) != nil {
+            var cvTexture: CVMetalTexture?
+            if CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, cache, flowBuffer, nil, .rg16Float, width, height, 0, &cvTexture
+            ) == kCVReturnSuccess,
+               let cvTexture,
+               let texture = CVMetalTextureGetTexture(cvTexture) {
+                return .success((texture, [cvTexture, flowBuffer]))
+            }
         }
 
-        guard let cache = textureCache else {
-            NSLog("VisionFlowProvider: Texture cache is nil!")
-            return nil
-        }
-
-        let flowBuffer = observation.pixelBuffer
-        let flowW = CVPixelBufferGetWidth(flowBuffer)
-        let flowH = CVPixelBufferGetHeight(flowBuffer)
-
-        var cvTex: CVMetalTexture?
-        let status = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, cache, flowBuffer, nil,
-            .rg16Float, flowW, flowH, 0, &cvTex
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rg16Float, width: width, height: height, mipmapped: false
         )
-        guard status == kCVReturnSuccess, let tex = cvTex,
-              let flowTexture = CVMetalTextureGetTexture(tex) else {
-            NSLog("VisionFlowProvider: CVMetalTexture creation failed (status: %d)", status)
-            return nil
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else {
+            return .failure(FlowFailure(reason: "could not allocate a flow texture"))
         }
-
-        // Copy to a persistent GPU texture (CVMetalTexture is transient)
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rg16Float, width: flowW, height: flowH, mipmapped: false
+        CVPixelBufferLockBaseAddress(flowBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(flowBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(flowBuffer) else {
+            return .failure(FlowFailure(reason: "flow buffer has no CPU address"))
+        }
+        texture.replace(
+            region: MTLRegionMake2D(0, 0, width, height),
+            mipmapLevel: 0,
+            withBytes: base,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(flowBuffer)
         )
-        desc.usage = [.shaderRead, .shaderWrite]
-        desc.storageMode = .private
-        guard let persistentTex = device.makeTexture(descriptor: desc),
-              let copyBuf = commandQueue.makeCommandBuffer(),
-              let blit = copyBuf.makeBlitCommandEncoder() else {
-            NSLog("VisionFlowProvider: Failed to create persistent flow texture")
-            return nil
-        }
-        blit.copy(from: flowTexture, to: persistentTex)
-        blit.endEncoding()
-        copyBuf.commit()
-        copyBuf.waitUntilCompleted()
-
-        return persistentTex
+        return .success((texture, []))
     }
 
-    private func createPixelBuffer(width: Int, height: Int) -> CVPixelBuffer? {
-        var pb: CVPixelBuffer?
-        let attrs: [String: Any] = [
+    private func pool(width: Int, height: Int) -> CVPixelBufferPool? {
+        if let pixelBufferPool, poolWidth == width, poolHeight == height {
+            return pixelBufferPool
+        }
+        let attributes: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: width,
+            kCVPixelBufferHeightKey as String: height,
             kCVPixelBufferMetalCompatibilityKey as String: true,
             kCVPixelBufferIOSurfacePropertiesKey as String: [:] as [String: Any]
         ]
-        CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                           kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
-        return pb
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool)
+        pixelBufferPool = pool
+        poolWidth = width
+        poolHeight = height
+        return pool
+    }
+
+    private func distance(_ a: UInt64, _ b: UInt64) -> UInt64 {
+        a > b ? a - b : b - a
     }
 }

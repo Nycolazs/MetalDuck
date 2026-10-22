@@ -1,479 +1,513 @@
 import AppKit
 
-// MARK: - CompactDropdown
-
-/// A fully custom dropdown selector that matches the MetalDuck dark UI aesthetic.
-/// Replaces NSPopUpButton throughout the app with a compact, floating, animated panel.
+/// In-app picker. Same selection API as the old pop-up button: programmatic
+/// `selectItem` calls do not fire `onSelectionChanged`; only a user pick does.
 @MainActor
-final class CompactDropdown: NSView {
-
-    // MARK: - Public API
-
-    /// The list of option titles. Setting this rebuilds the displayed items.
+final class CompactDropdown: NSControl {
     var items: [String] = [] {
-        didSet { rebuildItems() }
-    }
-
-    /// The currently selected item's title (read/write).
-    var selectedTitle: String? {
-        get { _selectedTitle }
-        set {
-            if let t = newValue, items.contains(t) {
-                _selectedTitle = t
-                updateLabel()
-            }
-        }
-    }
-
-    /// Zero-based index of the currently selected item, or -1 if none.
-    var indexOfSelectedItem: Int {
-        guard let t = _selectedTitle else { return -1 }
-        return items.firstIndex(of: t) ?? -1
-    }
-
-    /// Custom enabled state — callers can disable the control (e.g. captureSourceDropdown).
-    var isEnabled: Bool = true {
         didSet {
-            alphaValue = isEnabled ? 1.0 : 0.45
+            let previous = titleOfSelectedItem
+            if let previous, let index = items.firstIndex(of: previous) {
+                selectedIndex = index
+            } else {
+                selectedIndex = items.isEmpty ? -1 : 0
+            }
+            refreshTitle()
+            openMenu?.dismiss()
         }
     }
 
-    /// Called when the user picks an option. Receives (title, index).
     var onSelectionChanged: ((String, Int) -> Void)?
 
-    // MARK: - Programmatic selection (non-triggering)
+    private var selectedIndex = -1
+    private var openMenu: GlassDropdownMenu?
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let chevron = NSImageView()
+    private let chrome = DropdownChrome()
 
-    func selectItem(withTitle title: String) {
-        guard items.contains(title) else { return }
-        _selectedTitle = title
-        updateLabel()
+    var titleOfSelectedItem: String? {
+        items.indices.contains(selectedIndex) ? items[selectedIndex] : nil
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        translatesAutoresizingMaskIntoConstraints = false
+        focusRingType = .none
+        setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+
+        chrome.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(chrome)
+        pin(chrome, to: self)
+
+        titleLabel.font = GlassFont.body
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        chevron.image = GlassSymbol.image("chevron.up.chevron.down", size: 9, weight: .semibold)
+        chevron.contentTintColor = .tertiaryLabelColor
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        chevron.setContentHuggingPriority(.required, for: .horizontal)
+
+        let stack = NSStackView(views: [titleLabel, chevron])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 32),
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 132),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevron.widthAnchor.constraint(equalToConstant: 12)
+        ])
+    }
+
+    convenience init() {
+        self.init(frame: .zero)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 
     func selectItem(at index: Int) {
         guard items.indices.contains(index) else { return }
-        _selectedTitle = items[index]
-        updateLabel()
+        selectedIndex = index
+        refreshTitle()
     }
 
-    // MARK: - Private state
-
-    private var _selectedTitle: String?
-
-    // Selector field subviews
-    private let selectorContainer = NSView()
-    private let label = NSTextField(labelWithString: "")
-    private let chevron = NSTextField(labelWithString: "▾")
-
-    // Floating panel
-    private var panel: NSPanel?
-    private var panelContentView: NSView?
-    private var itemRows: [DropdownItemRow] = []
-    private var globalMonitor: Any?
-    private var localMonitor: Any?
-
-    // MARK: - Init
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        setup()
+    func selectItem(withTitle title: String) {
+        guard let index = items.firstIndex(of: title) else { return }
+        selectItem(at: index)
     }
 
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    // MARK: - Setup
-
-    private func setup() {
-        translatesAutoresizingMaskIntoConstraints = false
-
-        // Selector container (the visible "button" area)
-        selectorContainer.translatesAutoresizingMaskIntoConstraints = false
-        selectorContainer.wantsLayer = true
-        selectorContainer.layer?.cornerRadius = 8
-        selectorContainer.layer?.borderWidth = 1
-        selectorContainer.layer?.borderColor = DropdownTheme.border.cgColor
-        selectorContainer.layer?.backgroundColor = DropdownTheme.selectorBg.cgColor
-
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = DropdownTheme.font
-        label.textColor = DropdownTheme.bodyText
-        label.lineBreakMode = .byTruncatingTail
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        chevron.translatesAutoresizingMaskIntoConstraints = false
-        chevron.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        chevron.textColor = DropdownTheme.mutedText
-        chevron.setContentHuggingPriority(.required, for: .horizontal)
-        chevron.isHidden = true
-
-        selectorContainer.addSubview(label)
-        selectorContainer.addSubview(chevron)
-        addSubview(selectorContainer)
-
-        NSLayoutConstraint.activate([
-            selectorContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
-            selectorContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
-            selectorContainer.topAnchor.constraint(equalTo: topAnchor),
-            selectorContainer.bottomAnchor.constraint(equalTo: bottomAnchor),
-            selectorContainer.heightAnchor.constraint(equalToConstant: 26),
-
-            label.leadingAnchor.constraint(equalTo: selectorContainer.leadingAnchor, constant: 9),
-            label.centerYAnchor.constraint(equalTo: selectorContainer.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: selectorContainer.trailingAnchor, constant: -9),
-
-            chevron.trailingAnchor.constraint(equalTo: selectorContainer.trailingAnchor, constant: -8),
-            chevron.centerYAnchor.constraint(equalTo: selectorContainer.centerYAnchor),
-        ])
-
-        // Track clicks
-        let click = NSClickGestureRecognizer(target: self, action: #selector(handleSelectorClick))
-        selectorContainer.addGestureRecognizer(click)
-
-        // Hover tracking on selector
-        setupSelectorTracking()
-    }
-
-    // MARK: - Hover on Selector
-
-    private var selectorTrackingArea: NSTrackingArea?
-
-    private func setupSelectorTracking() {
-        if let old = selectorTrackingArea {
-            selectorContainer.removeTrackingArea(old)
+    override var isEnabled: Bool {
+        didSet {
+            alphaValue = isEnabled ? 1 : 0.4
+            if !isEnabled { openMenu?.dismiss() }
         }
-        let area = NSTrackingArea(
-            rect: selectorContainer.bounds,
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let text = titleLabel.stringValue as NSString
+        let width = text.size(withAttributes: [.font: GlassFont.body]).width
+        return NSSize(width: min(240, max(148, ceil(width) + 46)), height: 32)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled, !items.isEmpty else { return }
+        if openMenu != nil {
+            openMenu?.dismiss()
+        } else {
+            showMenu()
+        }
+    }
+
+    private func refreshTitle() {
+        titleLabel.stringValue = titleOfSelectedItem ?? "—"
+        toolTip = titleOfSelectedItem
+        invalidateIntrinsicContentSize()
+    }
+
+    private func showMenu() {
+        guard let window, selectedIndex >= 0 else { return }
+        GlassDropdownMenu.dismissCurrent()
+        let menu = GlassDropdownMenu(items: items, selectedIndex: selectedIndex, anchor: self)
+        menu.onSelect = { [weak self] index in
+            guard let self else { return }
+            self.selectItem(at: index)
+            if let title = self.titleOfSelectedItem {
+                self.onSelectionChanged?(title, index)
+            }
+        }
+        menu.onDismiss = { [weak self] in
+            self?.openMenu = nil
+            self?.chrome.setOpen(false)
+        }
+        openMenu = menu
+        chrome.setOpen(true)
+        menu.show(below: self, in: window)
+    }
+}
+
+private final class DropdownChrome: AppearanceLayerView {
+    private var isOpen = false
+    private var isHovered = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1
+        accentObserver = GlassAccent.observe { [weak self] in
+            self?.needsDisplay = true
+        }
+    }
+
+    nonisolated(unsafe) private var accentObserver: NSObjectProtocol?
+
+    deinit {
+        if let accentObserver {
+            NotificationCenter.default.removeObserver(accentObserver)
+        }
+    }
+
+    override func applyLayerColors() {
+        let dark = effectiveAppearance.isDark
+        let alpha: CGFloat = isHovered || isOpen ? (dark ? 0.12 : 0.07) : (dark ? 0.07 : 0.04)
+        let base: NSColor = dark ? .white : .black
+        GlassMotion.animate(layer, backgroundColor: base.withAlphaComponent(alpha).cgColor)
+        layer?.borderColor = (isOpen ? GlassAccent.color : GlassColor.stroke).cgColor
+    }
+
+    func setOpen(_ open: Bool) {
+        isOpen = open
+        needsDisplay = true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
             owner: self,
             userInfo: nil
-        )
-        selectorContainer.addTrackingArea(area)
-        selectorTrackingArea = area
+        ))
     }
 
     override func mouseEntered(with event: NSEvent) {
-        guard isEnabled else { return }
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.1
-            selectorContainer.layer?.backgroundColor = DropdownTheme.selectorHoverBg.cgColor
-        }
+        isHovered = true
+        needsDisplay = true
     }
 
     override func mouseExited(with event: NSEvent) {
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            selectorContainer.layer?.backgroundColor = DropdownTheme.selectorBg.cgColor
-        }
+        isHovered = false
+        needsDisplay = true
     }
+}
 
-    // MARK: - Label Update
+private final class GlassMenuPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
 
-    private func updateLabel() {
-        label.stringValue = _selectedTitle ?? ""
-    }
+@MainActor
+private final class GlassDropdownMenu {
+    static weak var current: GlassDropdownMenu?
 
-    private func rebuildItems() {
-        // If panel currently open, refresh it
-        if panel != nil {
-            closePanel(animated: false)
-        }
-    }
+    var onSelect: ((Int) -> Void)?
+    var onDismiss: (() -> Void)?
 
-    // MARK: - Open / Close
+    private let panel: NSPanel
+    private let rows: [MenuRow]
+    private var highlightedIndex: Int
+    private var monitor: Any?
+    private var didDismiss = false
 
-    @objc private func handleSelectorClick() {
-        guard isEnabled else { return }
-        if panel != nil {
-            closePanel(animated: true)
-        } else {
-            openPanel()
-        }
-    }
+    init(items: [String], selectedIndex: Int, anchor: NSView) {
+        highlightedIndex = selectedIndex
+        let rowHeight: CGFloat = 36
+        let visible = min(items.count, 8)
+        let width = Self.preferredWidth(for: items, minimum: anchor.bounds.width)
+        let height = CGFloat(visible) * rowHeight + 12
 
-    private func openPanel() {
-        guard let window = self.window, let _ = window.screen else { return }
+        panel = GlassMenuPanel(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.level = .popUpMenu
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.hidesOnDeactivate = true
+        panel.appearance = anchor.effectiveAppearance
 
-        // Build content view
-        let contentView = NSView()
-        contentView.wantsLayer = true
-        contentView.layer?.cornerRadius = 11
-        contentView.layer?.masksToBounds = true
-        contentView.layer?.backgroundColor = DropdownTheme.panelBg.cgColor
+        let effect = NSVisualEffectView()
+        effect.material = .popover
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        effect.maskImage = Self.roundedMask(radius: 16)
+        panel.contentView = effect
 
+        let document = FlippedView()
         let stack = NSStackView()
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 0
-        contentView.addSubview(stack)
 
-        itemRows = items.enumerated().map { (idx, title) in
-            let row = DropdownItemRow(
-                title: title,
-                isSelected: title == _selectedTitle,
-                onSelect: { [weak self] in
-                    self?.didSelectItem(title: title, index: idx)
-                }
-            )
+        let builtRows = items.enumerated().map { index, title in
+            MenuRow(title: title, showsCheck: index == selectedIndex)
+        }
+        rows = builtRows
+        for (index, row) in rows.enumerated() {
+            row.onClick = { [weak self] in self?.commit(index) }
+            row.onHover = { [weak self] in
+                guard let self, self.highlightedIndex != index else { return }
+                self.highlightedIndex = index
+                self.applyHighlight()
+            }
             stack.addArrangedSubview(row)
-            return row
         }
 
-        // Constrain stack to content
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(stack)
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = items.count > visible
+        scroll.autohidesScrollers = true
+        scroll.documentView = document
+        effect.addSubview(scroll)
+
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -4),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4),
+            scroll.leadingAnchor.constraint(equalTo: effect.leadingAnchor, constant: 6),
+            scroll.trailingAnchor.constraint(equalTo: effect.trailingAnchor, constant: -6),
+            scroll.topAnchor.constraint(equalTo: effect.topAnchor, constant: 6),
+            scroll.bottomAnchor.constraint(equalTo: effect.bottomAnchor, constant: -6),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: document.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: document.bottomAnchor)
         ])
-
-        // Make rows fill width
-        let panelWidth: CGFloat = max(bounds.width, 160)
-        let rowHeight: CGFloat = 28
-        let panelHeight: CGFloat = CGFloat(items.count) * rowHeight + 8
-
-        for row in itemRows {
-            row.widthAnchor.constraint(equalToConstant: panelWidth - 8).isActive = true
+        for row in rows {
+            row.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
             row.heightAnchor.constraint(equalToConstant: rowHeight).isActive = true
         }
-
-        contentView.frame = NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight)
-
-        // Create panel
-        let newPanel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
-            styleMask: [.borderless, .nonactivatingPanel],
-            backing: .buffered,
-            defer: true
-        )
-        newPanel.backgroundColor = .clear
-        newPanel.isOpaque = false
-        newPanel.hasShadow = true
-        newPanel.level = .popUpMenu
-        newPanel.contentView = contentView
-        newPanel.isReleasedWhenClosed = false
-
-        // Shadow on the window
-        newPanel.contentView?.wantsLayer = true
-
-        // Position: directly below the selector field
-        let selectorFrameInWindow = convert(bounds, to: nil)
-        let screenFrame = window.convertToScreen(selectorFrameInWindow)
-        let panelOrigin = NSPoint(
-            x: screenFrame.minX,
-            y: screenFrame.minY - panelHeight - 2
-        )
-        newPanel.setFrameOrigin(panelOrigin)
-
-        // Animate in: start transparent + slightly scaled
-        contentView.alphaValue = 0
-        contentView.layer?.transform = CATransform3DMakeScale(0.98, 0.98, 1)
-
-        window.addChildWindow(newPanel, ordered: .above)
-        self.panel = newPanel
-        self.panelContentView = contentView
-
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.13
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            ctx.allowsImplicitAnimation = true
-            contentView.alphaValue = 1
-            contentView.layer?.transform = CATransform3DIdentity
-        }
-
-        // Install click-outside monitors
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            DispatchQueue.main.async { self?.closePanel(animated: true) }
-        }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let self else { return event }
-            // If the click is inside the panel, allow it through
-            if let p = self.panel, event.window == p { return event }
-            // If the click is on this selector view, allow (handleSelectorClick will close)
-            if event.window == self.window {
-                let loc = self.convert(event.locationInWindow, from: nil)
-                if self.bounds.contains(loc) { return event }
-            }
-            DispatchQueue.main.async { self.closePanel(animated: true) }
-            return event
-        }
+        applyHighlight()
     }
 
-    private func closePanel(animated: Bool) {
-        removeEventMonitors()
-        guard let panel = panel, let content = panelContentView else { return }
-        self.panel = nil
-        self.panelContentView = nil
-        self.itemRows = []
-
-        if animated {
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.1
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                ctx.allowsImplicitAnimation = true
-                content.alphaValue = 0
-            } completionHandler: {
-                DispatchQueue.main.async {
-                    panel.parent?.removeChildWindow(panel)
-                    panel.close()
-                }
-            }
+    func show(below control: NSView, in window: NSWindow) {
+        Self.current = self
+        let screenRect = window.convertToScreen(control.convert(control.bounds, to: nil))
+        let size = panel.frame.size
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame ?? screenRect
+        var origin = NSPoint(x: screenRect.minX, y: screenRect.minY - size.height - 6)
+        if origin.y < visible.minY {
+            origin.y = screenRect.maxY + 6
+        }
+        if origin.x + size.width > visible.maxX - 8 {
+            origin.x = visible.maxX - size.width - 8
+        }
+        if origin.x < visible.minX + 8 {
+            origin.x = visible.minX + 8
+        }
+        if GlassMotion.reduceMotion {
+            panel.setFrameOrigin(origin)
+            panel.orderFrontRegardless()
         } else {
-            panel.parent?.removeChildWindow(panel)
-            panel.close()
+            panel.alphaValue = 0
+            panel.setFrameOrigin(NSPoint(x: origin.x, y: origin.y + 8))
+            panel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+                panel.animator().alphaValue = 1
+                panel.animator().setFrameOrigin(origin)
+            }
+        }
+        rows[highlightedIndex].scrollToVisible(rows[highlightedIndex].bounds)
+
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
+            guard let self else { return event }
+            return self.handle(event, control: control)
         }
     }
 
-    private func removeEventMonitors() {
-        if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
-        if let m = localMonitor  { NSEvent.removeMonitor(m); localMonitor = nil }
+    func dismiss() {
+        guard !didDismiss else { return }
+        didDismiss = true
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+        let panel = self.panel
+        if GlassMotion.reduceMotion {
+            panel.orderOut(nil)
+        } else {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.12
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                MainActor.assumeIsolated { panel.orderOut(nil) }
+            })
+        }
+        if Self.current === self { Self.current = nil }
+        onDismiss?()
     }
 
-    // MARK: - Selection
+    static func dismissCurrent() {
+        current?.dismiss()
+    }
 
-    private func didSelectItem(title: String, index: Int) {
-        _selectedTitle = title
-        updateLabel()
-        // Refresh checkmarks visually
-        for row in itemRows { row.setSelected(row.title == title) }
-        closePanel(animated: true)
-        onSelectionChanged?(title, index)
+    private func handle(_ event: NSEvent, control: NSView) -> NSEvent? {
+        if event.type == .keyDown {
+            switch event.keyCode {
+            case 53:
+                dismiss()
+                return nil
+            case 125:
+                moveHighlight(1)
+                return nil
+            case 126:
+                moveHighlight(-1)
+                return nil
+            case 36, 49:
+                commit(highlightedIndex)
+                return nil
+            default:
+                return event
+            }
+        }
+        if event.type == .leftMouseDown, let index = rowIndex(at: event) {
+            commit(index)
+            return nil
+        }
+        if event.window == panel { return event }
+        if event.window == control.window {
+            let point = control.convert(event.locationInWindow, from: nil)
+            if control.bounds.contains(point) { return event }
+        }
+        dismiss()
+        return event
+    }
+
+    private func moveHighlight(_ delta: Int) {
+        guard !rows.isEmpty else { return }
+        highlightedIndex = min(rows.count - 1, max(0, highlightedIndex + delta))
+        applyHighlight()
+        rows[highlightedIndex].scrollToVisible(rows[highlightedIndex].bounds)
+    }
+
+    private func applyHighlight() {
+        for (index, row) in rows.enumerated() {
+            row.isHighlighted = index == highlightedIndex
+        }
+    }
+
+    private func commit(_ index: Int) {
+        onSelect?(index)
+        dismiss()
+    }
+
+    /// Clicks on a nonactivating panel often arrive in the window underneath.
+    /// Resolve them in screen space so a row still selects.
+    private func rowIndex(at event: NSEvent) -> Int? {
+        let screenPoint = event.window?.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
+            ?? NSEvent.mouseLocation
+        guard panel.frame.contains(screenPoint), let content = panel.contentView else { return nil }
+        let inContent = content.convert(panel.convertPoint(fromScreen: screenPoint), from: nil)
+        for (index, row) in rows.enumerated() {
+            if row.bounds.contains(row.convert(inContent, from: content)) {
+                return index
+            }
+        }
+        return nil
+    }
+
+    private static func roundedMask(radius: CGFloat) -> NSImage {
+        let side = radius * 2 + 1
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
+    }
+
+    private static func preferredWidth(for items: [String], minimum: CGFloat) -> CGFloat {
+        let font = GlassFont.body
+        let widest = items.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 80
+        return min(360, max(minimum, ceil(widest) + 64))
     }
 
 }
 
-// MARK: - DropdownItemRow
-
-/// A single row inside the dropdown panel list.
 @MainActor
-private final class DropdownItemRow: NSView {
-    let title: String
-    private let onSelect: () -> Void
-    private let titleLabel = NSTextField(labelWithString: "")
-    private let checkLabel = NSTextField(labelWithString: "")
-    private var trackingArea: NSTrackingArea?
-    private var isHovered = false
-    private var _isSelected = false
+private final class MenuRow: AppearanceLayerView {
+    var onClick: (() -> Void)?
+    var onHover: (() -> Void)?
+    var isHighlighted = false {
+        didSet { needsDisplay = true }
+    }
 
-    init(title: String, isSelected: Bool, onSelect: @escaping () -> Void) {
-        self.title = title
-        self.onSelect = onSelect
+    private let titleLabel: NSTextField
+    private let check: NSImageView
+
+    init(title: String, showsCheck: Bool) {
+        titleLabel = GlassLabel.make(title, font: GlassFont.body)
+        check = NSImageView()
         super.init(frame: .zero)
-        self._isSelected = isSelected
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = 6
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
 
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = DropdownTheme.font
-        titleLabel.textColor = DropdownTheme.bodyText
-        titleLabel.lineBreakMode = .byTruncatingTail
+        check.image = showsCheck ? GlassSymbol.image("checkmark", size: 11, weight: .semibold) : nil
+        check.contentTintColor = GlassAccent.color
+        check.translatesAutoresizingMaskIntoConstraints = false
+
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        checkLabel.translatesAutoresizingMaskIntoConstraints = false
-        checkLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        checkLabel.textColor = DropdownTheme.accent
-        checkLabel.stringValue = isSelected ? "✓" : " "
-        checkLabel.setContentHuggingPriority(.required, for: .horizontal)
-        checkLabel.widthAnchor.constraint(equalToConstant: 16).isActive = true
-
-        titleLabel.stringValue = title
-        addSubview(titleLabel)
-        addSubview(checkLabel)
-
+        let stack = NSStackView(views: [check, titleLabel])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        addSubview(stack)
         NSLayoutConstraint.activate([
-            checkLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            checkLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-            titleLabel.leadingAnchor.constraint(equalTo: checkLabel.trailingAnchor, constant: 2),
-            titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            check.widthAnchor.constraint(equalToConstant: 14),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
-
-        updateBackground()
     }
 
-    required init?(coder: NSCoder) { fatalError() }
-
-    func setSelected(_ selected: Bool) {
-        _isSelected = selected
-        checkLabel.stringValue = selected ? "✓" : " "
-        updateBackground()
+    override func applyLayerColors() {
+        GlassMotion.animate(layer, backgroundColor: (isHighlighted ? GlassColor.selection : NSColor.clear).cgColor, duration: 0.12)
     }
 
-    private func updateBackground() {
-        if isHovered {
-            layer?.backgroundColor = DropdownTheme.rowHoverBg.cgColor
-        } else if _isSelected {
-            layer?.backgroundColor = DropdownTheme.rowSelectedBg.cgColor
-        } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
-        }
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
     }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        if let t = trackingArea { removeTrackingArea(t) }
-        let area = NSTrackingArea(
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
             rect: bounds,
             options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingArea = area
+        ))
     }
 
     override func mouseEntered(with event: NSEvent) {
-        isHovered = true
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.08
-            ctx.allowsImplicitAnimation = true
-            updateBackground()
-        }
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHovered = false
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.1
-            ctx.allowsImplicitAnimation = true
-            updateBackground()
-        }
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        let loc = convert(event.locationInWindow, from: nil)
-        if bounds.contains(loc) { onSelect() }
+        onHover?()
     }
 
     override func mouseDown(with event: NSEvent) {
-        // Accept mouseDown so mouseUp fires in this view
+        onClick?()
     }
-}
-
-// MARK: - DropdownTheme
-
-/// Local colour + font constants that match UniTheme / the app's card style.
-private enum DropdownTheme {
-    // Selector field
-    static let selectorBg    = NSColor(calibratedRed: 0.16, green: 0.17, blue: 0.20, alpha: 0.70)
-    static let selectorHoverBg = NSColor(calibratedRed: 0.20, green: 0.21, blue: 0.25, alpha: 0.80)
-    static let border        = NSColor(calibratedRed: 0.26, green: 0.27, blue: 0.32, alpha: 0.35)
-
-    // Floating panel
-    static let panelBg       = NSColor(calibratedRed: 0.14, green: 0.15, blue: 0.18, alpha: 0.98)
-
-    // Rows
-    static let rowHoverBg    = NSColor(calibratedRed: 0.20, green: 0.21, blue: 0.26, alpha: 1.0)
-    static let rowSelectedBg = NSColor(calibratedRed: 0.18, green: 0.19, blue: 0.24, alpha: 0.60)
-
-    // Text
-    static let bodyText  = NSColor(calibratedRed: 0.78, green: 0.80, blue: 0.84, alpha: 1.0)
-    static let mutedText = NSColor(calibratedRed: 0.50, green: 0.53, blue: 0.58, alpha: 1.0)
-    static let accent    = NSColor(calibratedRed: 0.30, green: 0.56, blue: 0.93, alpha: 1.0)
-
-    nonisolated(unsafe) static let font = NSFont.systemFont(ofSize: 12, weight: .medium)
 }

@@ -9,6 +9,7 @@ final class ScalingOverlayController {
     private let outputViewController: OutputViewController
     private weak var controlWindow: NSWindow?
     private var outputWindow: NSWindow?
+    private var currentScreen: NSScreen?
 
     init(device: MTLDevice, controlWindow: NSWindow?) {
         self.outputViewController = OutputViewController(device: device)
@@ -26,6 +27,7 @@ final class ScalingOverlayController {
             return
         }
 
+        currentScreen = targetScreen
         let window = ensureOutputWindow(on: targetScreen)
         if window.isMiniaturized {
             window.deminiaturize(nil)
@@ -54,11 +56,46 @@ final class ScalingOverlayController {
             // Add a small safety to prevent impossible sizing from causing errors
             cocoaRect.size.width = max(1.0, cocoaRect.size.width)
             cocoaRect.size.height = max(1.0, cocoaRect.size.height)
-            self.outputWindow?.setFrame(cocoaRect, display: true, animate: false)
+            if let screen = self.currentScreen ?? self.outputWindow?.screen {
+                cocoaRect = Self.clampedToVisibleFrame(cocoaRect, on: screen)
+            }
+            guard let window = self.outputWindow, window.frame != cocoaRect else { return }
+            window.setFrame(cocoaRect, display: true, animate: false)
         }
     }
+
+    /// Popup menus are 101. Stay above the game, Dock, and ordinary windows, but under every menu.
+    static let belowMenus = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue - 1)
+
+    /// Keeps the menu bar and Dock outside the picture, so Force Quit stays reachable.
+    private static func clampedToVisibleFrame(_ rect: CGRect, on screen: NSScreen) -> CGRect {
+        let visible = screen.visibleFrame
+        var clamped = rect
+        if clamped.minX < visible.minX {
+            clamped.size.width -= visible.minX - clamped.minX
+            clamped.origin.x = visible.minX
+        }
+        if clamped.maxX > visible.maxX {
+            clamped.size.width -= clamped.maxX - visible.maxX
+        }
+        if clamped.minY < visible.minY {
+            clamped.size.height -= visible.minY - clamped.minY
+            clamped.origin.y = visible.minY
+        }
+        if clamped.maxY > visible.maxY {
+            clamped.size.height -= clamped.maxY - visible.maxY
+        }
+        clamped.size.width = max(1, clamped.size.width)
+        clamped.size.height = max(1, clamped.size.height)
+        return clamped
+    }
+
     func updateStats(_ stats: RendererStats) {
         outputViewController.updateStats(stats)
+    }
+
+    func setHUDVisible(_ visible: Bool, animated: Bool) {
+        outputViewController.setTelemetryVisible(visible, animated: animated)
     }
 
     func setWaitingForFrames(message: String) {
@@ -87,7 +124,9 @@ final class ScalingOverlayController {
         window.isOpaque = false
         window.backgroundColor = NSColor.clear
         window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .transient, .stationary, .fullScreenAuxiliary]
-        window.level = .screenSaver
+        // Just under popup menus. screenSaver (1000) sits above the menu bar, so the
+        // status menu and Quit open behind the picture and cannot be clicked.
+        window.level = Self.belowMenus
         window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false
         window.contentViewController = outputViewController

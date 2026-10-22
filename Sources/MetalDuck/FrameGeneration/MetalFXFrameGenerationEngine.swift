@@ -1,283 +1,214 @@
+import CoreVideo
 import Foundation
 import Metal
-import simd
 
-struct FrameGenerationAuxiliary {
-    let depthTexture: MTLTexture
-    let motionTexture: MTLTexture
-    let uiTexture: MTLTexture?
-
-    init(depthTexture: MTLTexture, motionTexture: MTLTexture, uiTexture: MTLTexture? = nil) {
-        self.depthTexture = depthTexture
-        self.motionTexture = motionTexture
-        self.uiTexture = uiTexture
-    }
+enum FrameInterpolationAttempt {
+    case produced(
+        texture: MTLTexture,
+        flowWidth: Int,
+        flowHeight: Int,
+        flowFrameID: UInt64,
+        latestCaptureID: UInt64
+    )
+    case failed(String)
 }
 
-enum FrameGenerationError: Error {
-    case shaderCompilationFailed
-    case functionLookupFailed
-    case pipelineCreationFailed
-    case outputTextureCreationFailed
-    case flowTextureCreationFailed
-    case unsupportedDevice
-    case incompatibleTextures
-    case missingFlow
+/// A buffered capture as the engine sees it.
+struct GenerationFrame {
+    let texture: MTLTexture
+    let id: UInt64
 }
 
-// MARK: - Shader param structs (must match Present.metal)
-
-private struct FlowWarpParams {
-    var scale: Float
-}
-
-private struct FlowComposeParams {
+// Must match Present.metal.
+private struct FlowInterpolateParams {
     var t: Float
-    var errorThreshold: Float
-    var flowThreshold: Float
+    var flowGain: Float
+    var consistency: Float
+    var colorTolerance: Float
 }
 
-private struct FlowOcclusionParams {
-    var threshold: Float
-}
-
-// MARK: - Frame Generation Engine
-
-/// Core engine for generating interpolated frames using motion-compensated warping.
-/// Orchestrates occlusion detection, flow warping, and frame composition shaders.
+/// Builds in-between frames by warping two captures along Vision optical flow.
 final class MetalFXFrameGenerationEngine {
     private let device: MTLDevice
+    private let interpolatePipeline: MTLComputePipelineState?
+    private var outputTexture: MTLTexture?
 
-    // GPU pipelines for frame generation
-    private let flowWarpPipeline: MTLComputePipelineState?
-    private let flowOcclusionPipeline: MTLComputePipelineState?
-    private let flowComposePipeline: MTLComputePipelineState?
+    /// Round-trip error, in flow pixels, still treated as a reliable vector.
+    private let consistency: Float = 1.0
+    /// Flow from a neighbouring pair may only be used where both warps agree this closely.
+    private let borrowedFlowColorTolerance: Float = 0.08
+    /// How many captures away a borrowed flow may be.
+    private let maxBorrowDistance: UInt64 = 2
 
-    // Scratch textures for interpolation
-    private var occlusionTexture: MTLTexture?
-    private var warpedPrevTexture: MTLTexture?
-    private var warpedNextTexture: MTLTexture?
-    private var preGeneratedFrame: MTLTexture?
-
-    private let flowOcclusionThreshold: Float = 1.5
-
-    // Vision flow provider (async, runs on ANE)
     let visionFlowProvider: VisionFlowProvider
-    private var flowFrameCounter: UInt64 = 0
-
-    // Track the previous frame for flow & interpolation
-    private var previousFrameTexture: MTLTexture?
-    private var hasPendingInterpolatedFrame = false
 
     init(device: MTLDevice, commandQueue: MTLCommandQueue, library: MTLLibrary?) {
         self.device = device
         self.visionFlowProvider = VisionFlowProvider(device: device, commandQueue: commandQueue)
 
-        // Load compute pipelines from the provided library
-        guard let library = library else {
-            NSLog("MetalFXFrameGenerationEngine: No MTLLibrary provided — frame generation DISABLED")
-            self.flowWarpPipeline = nil
-            self.flowOcclusionPipeline = nil
-            self.flowComposePipeline = nil
+        guard let library else {
+            PipelineLog.shared.event("generate", "no shader library — optical-flow warping disabled")
+            self.interpolatePipeline = nil
             return
         }
 
-        func makeCompute(_ name: String) -> MTLComputePipelineState? {
-            guard let function = library.makeFunction(name: name) else {
-                NSLog("MetalFXFrameGenerationEngine: Failed to find function '%@'", name)
-                return nil
-            }
+        if let function = library.makeFunction(name: "flowInterpolate") {
             do {
-                let pipeline = try device.makeComputePipelineState(function: function)
-                NSLog("MetalFXFrameGenerationEngine: Loaded compute pipeline '%@'", name)
-                return pipeline
+                self.interpolatePipeline = try device.makeComputePipelineState(function: function)
             } catch {
-                NSLog("MetalFXFrameGenerationEngine: Failed to create pipeline for '%@': %@", name, error.localizedDescription)
-                return nil
+                PipelineLog.shared.event("generate", "pipeline flowInterpolate failed: \(error.localizedDescription)")
+                self.interpolatePipeline = nil
             }
+        } else {
+            PipelineLog.shared.event("generate", "missing shader function flowInterpolate")
+            self.interpolatePipeline = nil
         }
 
-        self.flowWarpPipeline = makeCompute("flowWarp")
-        self.flowOcclusionPipeline = makeCompute("flowOcclusion")
-        self.flowComposePipeline = makeCompute("flowCompose")
-        
-        NSLog("MetalFXFrameGenerationEngine: isSupported = %d", isSupported ? 1 : 0)
+        if isSupported {
+            PipelineLog.shared.event(
+                "generate",
+                "compute pipeline ready: flowInterpolate warps both captures and checks each vector against the opposite flow. Optical flow itself comes from Vision."
+            )
+        } else {
+            PipelineLog.shared.event(
+                "generate",
+                "compute pipeline missing. Frame generation can only linearly blend the two buffered captures."
+            )
+        }
     }
 
     var isSupported: Bool {
-        flowWarpPipeline != nil &&
-        flowOcclusionPipeline != nil &&
-        flowComposePipeline != nil
+        interpolatePipeline != nil
     }
 
-    /// Called when a new captured frame is available.
-    /// Submits flow request and stores for interpolation.
-    func onNewCapturedFrame(_ texture: MTLTexture) {
-        if let prev = previousFrameTexture,
-           prev.width == texture.width,
-           prev.height == texture.height {
-            flowFrameCounter += 1
-            NSLog("FrameGenEngine: Submitting flow request #%llu (%dx%d)", flowFrameCounter, texture.width, texture.height)
-            visionFlowProvider.submitFlowRequest(
-                prev: prev, next: texture, frameID: flowFrameCounter
-            )
-        } else {
-            NSLog("FrameGenEngine: onNewCapturedFrame skipped (no previous or size mismatch)")
+    /// Average time from a capture's timestamp until its flow is usable.
+    var flowReadyLatency: Double {
+        visionFlowProvider.flowReadyLatency
+    }
+
+    /// Encodes the downscaled copy Vision needs for a newly staged capture.
+    func prepareFlowFrame(
+        from texture: MTLTexture,
+        id: UInt64,
+        time: CFTimeInterval,
+        commandBuffer: MTLCommandBuffer
+    ) -> VisionFlowProvider.FlowFrame? {
+        guard isSupported else { return nil }
+        return visionFlowProvider.encodeFlowFrame(from: texture, id: id, time: time, commandBuffer: commandBuffer)
+    }
+
+    /// Starts flow for the pair once `commandBuffer`, which wrote both frames, has finished on the GPU.
+    func requestFlow(
+        previous: VisionFlowProvider.FlowFrame,
+        next: VisionFlowProvider.FlowFrame,
+        after commandBuffer: MTLCommandBuffer
+    ) {
+        guard CVPixelBufferGetWidth(previous.pixelBuffer) == CVPixelBufferGetWidth(next.pixelBuffer),
+              CVPixelBufferGetHeight(previous.pixelBuffer) == CVPixelBufferGetHeight(next.pixelBuffer) else { return }
+        let provider = visionFlowProvider
+        commandBuffer.addCompletedHandler { _ in
+            provider.submit(previous: previous, next: next)
         }
-        previousFrameTexture = texture
-        hasPendingInterpolatedFrame = true
     }
 
-    /// Try to generate an interpolated frame between last two captured frames.
-    /// Returns the interpolated texture if successful, or nil (caller should use shader blend as fallback).
-    func generateInterpolatedFrame(
+    /// Builds the frame at `t` between two buffered captures.
+    /// `.failed` means the caller should linearly blend instead.
+    func attemptInterpolation(
         commandBuffer: MTLCommandBuffer,
-        prevTexture: MTLTexture,
-        currentTexture: MTLTexture,
-        blendFactor: Float
-    ) -> MTLTexture? {
-        guard isSupported else {
-            NSLog("FrameGenEngine: NOT SUPPORTED (pipeline creation failed)")
-            return nil
+        previous: GenerationFrame,
+        next: GenerationFrame,
+        t: Float
+    ) -> FrameInterpolationAttempt {
+        guard let interpolatePipeline else {
+            return .failed("compute pipeline missing")
         }
-        guard prevTexture.width == currentTexture.width,
-              prevTexture.height == currentTexture.height else {
-            NSLog("FrameGenEngine: Size mismatch prev=%dx%d cur=%dx%d",
-                  prevTexture.width, prevTexture.height, currentTexture.width, currentTexture.height)
-            return nil
+        guard previous.texture.width == next.texture.width,
+              previous.texture.height == next.texture.height else {
+            return .failed("capture size changed between frames")
         }
 
-        // Use the latest available Vision flow (may be from previous pair — temporal coherence)
-        guard let flowResult = visionFlowProvider.latestFlow() else {
-            // Only log occasionally to avoid spam
-            return nil  // No flow available yet, caller uses shader blend fallback
+        let flow: VisionFlowProvider.FlowResult
+        let borrowed: Bool
+        if let exact = visionFlowProvider.flow(previousID: previous.id, nextID: next.id) {
+            flow = exact
+            borrowed = false
+        } else if let nearest = visionFlowProvider.nearestFlow(to: next.id),
+                  distance(nearest.nextID, next.id) <= maxBorrowDistance {
+            flow = nearest
+            borrowed = true
+        } else {
+            return .failed("no optical flow for this pair yet")
         }
 
-        let flowFwd = flowResult.forward
-        let flowBwd = flowResult.backward
+        let width = next.texture.width
+        let height = next.texture.height
+        guard let output = ensureOutputTexture(width: width, height: height, pixelFormat: next.texture.pixelFormat),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return .failed("could not encode interpolation")
+        }
 
-        // Flow textures must match frame dimensions for warp to work correctly
-        // Vision may return different resolution flow — that's OK, we can still use it
-        // The shader samples using UV coords so resolution mismatch is handled
-        NSLog("FrameGenEngine: Using VISION FLOW (fwd=%dx%d frame=%dx%d blend=%.2f)",
-              flowFwd.width, flowFwd.height, prevTexture.width, prevTexture.height, blendFactor)
+        var params = FlowInterpolateParams(
+            t: t,
+            flowGain: flow.gain,
+            consistency: consistency,
+            colorTolerance: borrowed ? borrowedFlowColorTolerance : 0
+        )
+        encoder.setComputePipelineState(interpolatePipeline)
+        encoder.setTexture(previous.texture, index: 0)
+        encoder.setTexture(next.texture, index: 1)
+        encoder.setTexture(flow.forward, index: 2)
+        encoder.setTexture(flow.backward, index: 3)
+        encoder.setTexture(output, index: 4)
+        encoder.setBytes(&params, length: MemoryLayout<FlowInterpolateParams>.stride, index: 0)
+        let threadWidth = interpolatePipeline.threadExecutionWidth
+        let threadHeight = max(1, interpolatePipeline.maxTotalThreadsPerThreadgroup / threadWidth)
+        encoder.dispatchThreads(
+            MTLSize(width: width, height: height, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threadWidth, height: threadHeight, depth: 1)
+        )
+        encoder.endEncoding()
 
-        return interpolateWithFlow(
-            prev: prevTexture, next: currentTexture,
-            flowForward: flowFwd, flowBackward: flowBwd,
-            t: blendFactor, commandBuffer: commandBuffer
+        // Keep the flow buffers alive until the GPU has read them.
+        commandBuffer.addCompletedHandler { _ in
+            withExtendedLifetime(flow) {}
+        }
+
+        return .produced(
+            texture: output,
+            flowWidth: flow.forward.width,
+            flowHeight: flow.forward.height,
+            flowFrameID: flow.nextID,
+            latestCaptureID: next.id
         )
     }
 
     func reset() {
         visionFlowProvider.reset()
-        flowFrameCounter = 0
-        previousFrameTexture = nil
-        hasPendingInterpolatedFrame = false
-        occlusionTexture = nil
-        warpedPrevTexture = nil
-        warpedNextTexture = nil
-        preGeneratedFrame = nil
+        outputTexture = nil
     }
 
     // MARK: - Private
 
-    private func interpolateWithFlow(
-        prev: MTLTexture, next: MTLTexture,
-        flowForward: MTLTexture, flowBackward: MTLTexture,
-        t: Float, commandBuffer: MTLCommandBuffer
-    ) -> MTLTexture? {
-        guard let flowWarpPipeline,
-              let flowOcclusionPipeline,
-              let flowComposePipeline else { return nil }
-
-        let w = prev.width
-        let h = prev.height
-
-        guard let occlusion = ensureTexture(&occlusionTexture, width: w, height: h, pixelFormat: .r16Float),
-              let warpPrev = ensureTexture(&warpedPrevTexture, width: w, height: h),
-              let warpNext = ensureTexture(&warpedNextTexture, width: w, height: h),
-              let output = ensureTexture(&preGeneratedFrame, width: w, height: h) else { return nil }
-
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return nil }
-
-        // 1. Occlusion detection
-        var occParams = FlowOcclusionParams(threshold: flowOcclusionThreshold)
-        encoder.setComputePipelineState(flowOcclusionPipeline)
-        encoder.setTexture(flowForward, index: 0)
-        encoder.setTexture(flowBackward, index: 1)
-        encoder.setTexture(occlusion, index: 2)
-        encoder.setBytes(&occParams, length: MemoryLayout<FlowOcclusionParams>.size, index: 0)
-        dispatchThreads(pipeline: flowOcclusionPipeline, encoder: encoder, width: w, height: h)
-
-        // 2. Warp prev frame forward by t
-        var warpPrevParams = FlowWarpParams(scale: t)
-        encoder.setComputePipelineState(flowWarpPipeline)
-        encoder.setTexture(prev, index: 0)
-        encoder.setTexture(flowForward, index: 1)
-        encoder.setTexture(warpPrev, index: 2)
-        encoder.setBytes(&warpPrevParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
-        dispatchThreads(pipeline: flowWarpPipeline, encoder: encoder, width: w, height: h)
-
-        // 3. Warp next frame backward by (1-t)
-        var warpNextParams = FlowWarpParams(scale: (1.0 - t))
-        encoder.setComputePipelineState(flowWarpPipeline)
-        encoder.setTexture(next, index: 0)
-        encoder.setTexture(flowBackward, index: 1)
-        encoder.setTexture(warpNext, index: 2)
-        encoder.setBytes(&warpNextParams, length: MemoryLayout<FlowWarpParams>.size, index: 0)
-        dispatchThreads(pipeline: flowWarpPipeline, encoder: encoder, width: w, height: h)
-
-        // 4. Compose final interpolated frame
-        var composeParams = FlowComposeParams(
-            t: t,
-            errorThreshold: 0.1,
-            flowThreshold: flowOcclusionThreshold
-        )
-        encoder.setComputePipelineState(flowComposePipeline)
-        encoder.setTexture(warpPrev, index: 0)
-        encoder.setTexture(warpNext, index: 1)
-        encoder.setTexture(occlusion, index: 2)
-        encoder.setTexture(prev, index: 3)
-        encoder.setTexture(next, index: 4)
-        encoder.setTexture(output, index: 5)
-        encoder.setBytes(&composeParams, length: MemoryLayout<FlowComposeParams>.size, index: 0)
-        dispatchThreads(pipeline: flowComposePipeline, encoder: encoder, width: w, height: h)
-
-        encoder.endEncoding()
-        return output
-    }
-
-    private func ensureTexture(_ texture: inout MTLTexture?, width: Int, height: Int,
-                                pixelFormat: MTLPixelFormat = .bgra8Unorm) -> MTLTexture? {
-        if let tex = texture,
-           tex.width == width,
-           tex.height == height,
-           tex.pixelFormat == pixelFormat {
-            return tex
+    private func ensureOutputTexture(width: Int, height: Int, pixelFormat: MTLPixelFormat) -> MTLTexture? {
+        if let outputTexture,
+           outputTexture.width == width,
+           outputTexture.height == height,
+           outputTexture.pixelFormat == pixelFormat {
+            return outputTexture
         }
-
-        let desc = MTLTextureDescriptor.texture2DDescriptor(
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: pixelFormat,
             width: width,
             height: height,
             mipmapped: false
         )
-        desc.usage = [.shaderRead, .shaderWrite]
-        desc.storageMode = .private
-        texture = device.makeTexture(descriptor: desc)
-        return texture
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        descriptor.storageMode = .private
+        outputTexture = device.makeTexture(descriptor: descriptor)
+        return outputTexture
     }
 
-    private func dispatchThreads(pipeline: MTLComputePipelineState,
-                                 encoder: MTLComputeCommandEncoder,
-                                 width: Int, height: Int) {
-        let threadW = pipeline.threadExecutionWidth
-        let threadH = pipeline.maxTotalThreadsPerThreadgroup / threadW
-        let threadsPerGroup = MTLSize(width: threadW, height: threadH, depth: 1)
-        let grid = MTLSize(width: (width + threadW - 1) / threadW,
-                           height: (height + threadH - 1) / threadH,
-                           depth: 1)
-        encoder.dispatchThreadgroups(grid, threadsPerThreadgroup: threadsPerGroup)
+    private func distance(_ a: UInt64, _ b: UInt64) -> UInt64 {
+        a > b ? a - b : b - a
     }
 }

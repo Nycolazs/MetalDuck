@@ -17,6 +17,16 @@ enum FrameGenerationMode: String, Codable, Equatable, CaseIterable {
     case x2 = "2x (30 -> 60)"
     case x3 = "3x (30 -> 90)"
     case x4 = "4x (30 -> 120)"
+
+    var multiplier: Int {
+        switch self {
+        case .x2: return 2
+        case .x3: return 3
+        case .x4: return 4
+        }
+    }
+
+    var title: String { "\(multiplier)×" }
 }
 
 struct RenderSettings: Codable, Equatable {

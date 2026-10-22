@@ -33,10 +33,14 @@ final class ProfileManager {
     private init() {
         // Built-in profiles optimized for specific use cases
         
-        // 🎮 Games: High capture rate, temporal upscaling, dynamic resolution
+        // Built-in IDs are fixed so the active preset survives relaunches.
+
+        // Games: High capture rate, temporal upscaling, dynamic resolution
         // Optimized for real-time game content with fast motion
         let games = Profile(
-            name: "🎮 Games",
+            id: UUID(uuidString: "6D3A4C1E-0001-4B6E-9C1D-4D7E7A11D001")!,
+            name: "Games",
+            symbol: "gamecontroller",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXTemporal,
                 outputScale: 1.0,
@@ -54,10 +58,12 @@ final class ProfileManager {
             isBuiltIn: true
         )
         
-        // 🎬 Anime: Low capture rate to match 24fps source, aggressive frame gen
+        // Anime: Low capture rate to match 24fps source, aggressive frame gen
         // High sharpness to preserve crisp line art and flat color regions
         let anime = Profile(
-            name: "🎬 Anime",
+            id: UUID(uuidString: "6D3A4C1E-0002-4B6E-9C1D-4D7E7A11D002")!,
+            name: "Anime",
+            symbol: "sparkles.tv",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXSpatial,
                 outputScale: 1.25,
@@ -75,10 +81,12 @@ final class ProfileManager {
             isBuiltIn: true
         )
         
-        // 🎥 Video: Standard capture for YouTube/Films (typically 30fps)
+        // Video: Standard capture for YouTube/Films (typically 30fps)
         // Moderate sharpness for natural film look, 2x frame gen for smooth playback
         let video = Profile(
-            name: "🎥 Video",
+            id: UUID(uuidString: "6D3A4C1E-0003-4B6E-9C1D-4D7E7A11D003")!,
+            name: "Video",
+            symbol: "play.rectangle",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXSpatial,
                 outputScale: 1.15,
@@ -99,7 +107,12 @@ final class ProfileManager {
         // Load saved profiles or use defaults
         if let data = UserDefaults.standard.data(forKey: storageKey),
            let saved = try? JSONDecoder().decode([Profile].self, from: data) {
-            self.profiles = [games, anime, video] + saved.filter { !$0.isBuiltIn }
+            let custom = saved.filter { !$0.isBuiltIn }.map { profile -> Profile in
+                var cleaned = profile
+                cleaned.name = Self.strippingLeadingEmoji(profile.name)
+                return cleaned
+            }
+            self.profiles = [games, anime, video] + custom
         } else {
             self.profiles = [games, anime, video]
         }
@@ -167,6 +180,14 @@ final class ProfileManager {
         return createProfile(name: newName, settings: profile.settings, capture: profile.capture)
     }
     
+    /// Older builds named presets "🎮 Games" etc., and copies inherited that prefix.
+    private static func strippingLeadingEmoji(_ name: String) -> String {
+        let trimmed = name.drop { character in
+            character.isWhitespace || character.unicodeScalars.contains { $0.properties.isEmojiPresentation }
+        }
+        return trimmed.isEmpty ? name : String(trimmed)
+    }
+
     private func saveCustomProfiles() {
         let custom = profiles.filter { !$0.isBuiltIn }
         if let data = try? JSONEncoder().encode(custom) {

@@ -2,6 +2,22 @@
 
 All notable changes to the MetalDuck project will be documented in this file.
 
+## [1.3] - 2026-10-22
+
+### Frame generation
+- Rewrote interpolation around Vision optical flow revision 1. Vectors are in pixels and a pair is ready in about 20 ms, so the frame on screen is built from the pair it sits between.
+- Output follows capture timestamps and trails the source by about one capture interval. 24 fps video stays evenly spaced under a 30 fps capture cap.
+- One compute kernel, `flowInterpolate`, warps both captures and rejects vectors that do not survive a round trip through the opposite field.
+- The configured capture rate and queue depth are applied to the ScreenCaptureKit stream.
+
+### Interface
+- Rebuilt the control panel, added the in-app guide, the menu-bar controls, and the activity monitor.
+
+### Removed
+- The per-capture motion estimator. Nothing in the pipeline read its result.
+- The Core Graphics capture fallback. MetalDuck requires macOS 15, where ScreenCaptureKit is always available.
+- The unused hook for game-provided depth and motion textures.
+
 ## [1.2.0] - 2026-03-17
 
 This release marks a major milestone in MetalDuck's evolution, focusing on **high-performance Frame Generation algorithms**, professional branding, and a refined installation experience.

@@ -1,367 +1,6 @@
 import AppKit
 import Foundation
 
-private enum UITheme {
-    static let bgTop = NSColor(calibratedRed: 0.12, green: 0.13, blue: 0.16, alpha: 1.0)
-    static let bgBottom = NSColor(calibratedRed: 0.08, green: 0.09, blue: 0.11, alpha: 1.0)
-
-    static let chrome = NSColor(calibratedRed: 0.15, green: 0.16, blue: 0.19, alpha: 0.95)
-    static let sidebar = NSColor(calibratedRed: 0.13, green: 0.14, blue: 0.17, alpha: 0.97)
-    static let card = NSColor(calibratedRed: 0.16, green: 0.17, blue: 0.20, alpha: 0.60)
-    static let cardBorder = NSColor(calibratedRed: 0.26, green: 0.27, blue: 0.32, alpha: 0.35)
-
-    static let title = NSColor(calibratedRed: 0.93, green: 0.94, blue: 0.96, alpha: 1.0)
-    static let body = NSColor(calibratedRed: 0.78, green: 0.80, blue: 0.84, alpha: 1.0)
-    static let muted = NSColor(calibratedRed: 0.50, green: 0.53, blue: 0.58, alpha: 1.0)
-    static let accent = NSColor(calibratedRed: 0.30, green: 0.56, blue: 0.93, alpha: 1.0)
-}
-
-private final class FlippedPanelContainerView: NSView {
-    override var isFlipped: Bool { true }
-}
-
-private final class FlippedStackView: NSStackView {
-    override var isFlipped: Bool { true }
-}
-
-private final class CardView: NSView {
-    let contentStack = NSStackView()
-
-    private let titleLabel: NSTextField
-    private let headerAccessory: NSView?
-
-    init(title: String, iconName: String? = nil, headerAccessory: NSView? = nil) {
-        self.titleLabel = NSTextField(labelWithString: title)
-        self.headerAccessory = headerAccessory
-        super.init(frame: .zero)
-
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = 12
-        layer?.borderWidth = 0
-        layer?.backgroundColor = UITheme.card.cgColor
-        layer?.shadowColor = NSColor.black.cgColor
-        layer?.shadowOpacity = 0.04
-        layer?.shadowRadius = 6
-        layer?.shadowOffset = CGSize(width: 0, height: -1)
-
-        titleLabel.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        titleLabel.textColor = UITheme.title
-
-        contentStack.orientation = .vertical
-        contentStack.alignment = .leading
-        contentStack.spacing = 10
-
-        var headerViews: [NSView] = []
-        if let iconName {
-            let icon = NSImageView()
-            icon.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-            icon.contentTintColor = UITheme.title
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            icon.heightAnchor.constraint(equalToConstant: 16).isActive = true
-            icon.widthAnchor.constraint(equalToConstant: 16).isActive = true
-            headerViews.append(icon)
-        }
-        headerViews.append(titleLabel)
-        
-        if let headerAccessory {
-            let spacer = NSView()
-            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            headerViews.append(spacer)
-            headerViews.append(headerAccessory)
-        }
-
-        let header = NSStackView(views: headerViews)
-        header.translatesAutoresizingMaskIntoConstraints = false
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 6
-
-        let divider = NSView()
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.wantsLayer = true
-        divider.layer?.backgroundColor = UITheme.cardBorder.withAlphaComponent(0.5).cgColor
-        divider.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
-
-        let root = NSStackView(views: [header, divider, contentStack])
-        root.translatesAutoresizingMaskIntoConstraints = false
-        root.orientation = .vertical
-        root.alignment = .leading
-        root.spacing = 8
-        root.setHuggingPriority(.required, for: .vertical)
-
-        addSubview(root)
-
-        // Single strategy: pin root to card edges, pin children to root width
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            root.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            root.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            root.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            divider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            contentStack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            contentStack.trailingAnchor.constraint(equalTo: root.trailingAnchor)
-        ])
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func setTitle(_ title: String) {
-        titleLabel.stringValue = title
-    }
-}
-
-private final class PresetButton: NSView {
-    let preset: ControlPreset
-    let nameLabel: NSTextField
-    let indicator: NSView
-    
-    var target: AnyObject?
-    var action: Selector?
-    
-    private(set) var isActive: Bool
-    
-    init(preset: ControlPreset, isActive: Bool) {
-        self.preset = preset
-        self.isActive = isActive
-        let title = "\(preset)".prefix(1).uppercased() + "\(preset)".dropFirst()
-        self.nameLabel = NSTextField(labelWithString: title)
-        self.indicator = NSView()
-        
-        super.init(frame: .zero)
-        
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = 8
-        
-        indicator.translatesAutoresizingMaskIntoConstraints = false
-        indicator.wantsLayer = true
-        indicator.layer?.cornerRadius = 3
-        indicator.layer?.backgroundColor = UITheme.accent.cgColor
-        indicator.isHidden = !isActive
-        
-        nameLabel.font = NSFont.systemFont(ofSize: 13, weight: isActive ? .semibold : .medium)
-        nameLabel.textColor = isActive ? UITheme.title : UITheme.muted
-        nameLabel.isEditable = false
-        nameLabel.isBordered = false
-        nameLabel.drawsBackground = false
-        
-        let stack = NSStackView(views: [indicator, nameLabel])
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        
-        addSubview(stack)
-        
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 34),
-            indicator.widthAnchor.constraint(equalToConstant: 6),
-            indicator.heightAnchor.constraint(equalToConstant: 6),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-        
-        updateAppearance()
-        
-        let trackingArea = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self, userInfo: nil)
-        addTrackingArea(trackingArea)
-    }
-    
-    required init?(coder: NSCoder) { fatalError() }
-    
-    private func updateAppearance(isHovered: Bool = false) {
-        if isActive {
-            layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.25).cgColor
-            layer?.borderWidth = 1
-            layer?.borderColor = UITheme.accent.withAlphaComponent(0.4).cgColor
-        } else if isHovered {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-            layer?.borderWidth = 1
-            layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
-        } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
-            layer?.borderWidth = 0
-        }
-    }
-    
-    override func mouseEntered(with event: NSEvent) {
-        updateAppearance(isHovered: true)
-    }
-    
-    override func mouseExited(with event: NSEvent) {
-        updateAppearance(isHovered: false)
-    }
-    
-    override func mouseDown(with event: NSEvent) {
-        layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.4).cgColor
-        let _ = target?.perform(action, with: self)
-    }
-}
-
-
-private final class SidebarIconButton: NSButton {
-    var drawsBackground: Bool = true {
-        didSet { updateAppearance() }
-    }
-    
-    var onHover: ((Bool) -> Void)?
-    
-    private var isHovered: Bool = false {
-        didSet { 
-            updateAppearance()
-            onHover?(isHovered)
-        }
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        title = ""
-        bezelStyle = .inline
-        isBordered = false
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        layer?.backgroundColor = UITheme.card.cgColor
-        contentTintColor = UITheme.body
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        trackingAreas.forEach { removeTrackingArea($0) }
-        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect]
-        addTrackingArea(NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil))
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        isHovered = true
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        isHovered = false
-    }
-
-    private func updateAppearance() {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
-            if isHovered {
-                layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.3).cgColor
-                contentTintColor = UITheme.title
-            } else {
-                layer?.backgroundColor = drawsBackground ? UITheme.card.cgColor : NSColor.clear.cgColor
-                contentTintColor = UITheme.body
-            }
-
-        }
-    }
-}
-
-private final class ProfileButton: NSView {
-
-    let profileId: UUID
-    let nameLabel: NSTextField
-    let indicator: NSView
-    
-    var target: AnyObject?
-    var action: Selector?
-    
-    private(set) var isActive: Bool
-    
-    init(profile: Profile, isActive: Bool) {
-        self.profileId = profile.id
-        self.isActive = isActive
-        self.nameLabel = NSTextField(labelWithString: profile.name)
-        self.indicator = NSView()
-        
-        super.init(frame: .zero)
-        
-        translatesAutoresizingMaskIntoConstraints = false
-        wantsLayer = true
-        layer?.cornerRadius = 8
-        
-        indicator.translatesAutoresizingMaskIntoConstraints = false
-        indicator.wantsLayer = true
-        indicator.layer?.cornerRadius = 3
-        indicator.layer?.backgroundColor = UITheme.accent.cgColor
-        indicator.isHidden = !isActive
-        
-        nameLabel.font = NSFont.systemFont(ofSize: 14, weight: isActive ? .semibold : .medium)
-        nameLabel.textColor = isActive ? UITheme.title : UITheme.body.withAlphaComponent(0.8)
-
-        nameLabel.isEditable = false
-        nameLabel.isBordered = false
-        nameLabel.drawsBackground = false
-        
-        let stack = NSStackView(views: [indicator, nameLabel])
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        
-        addSubview(stack)
-        
-        NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: 34),
-            indicator.widthAnchor.constraint(equalToConstant: 6),
-            indicator.heightAnchor.constraint(equalToConstant: 6),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-        
-        updateAppearance()
-        
-        let trackingArea = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self, userInfo: nil)
-        addTrackingArea(trackingArea)
-    }
-    
-    required init?(coder: NSCoder) { fatalError() }
-    
-    private func updateAppearance(isHovered: Bool = false) {
-        if isActive {
-            layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.25).cgColor
-            layer?.borderWidth = 1
-            layer?.borderColor = UITheme.accent.withAlphaComponent(0.4).cgColor
-        } else if isHovered {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-            layer?.borderWidth = 1
-            layer?.borderColor = NSColor.white.withAlphaComponent(0.2).cgColor
-        } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
-            layer?.borderWidth = 0
-        }
-
-    }
-    
-    override func mouseEntered(with event: NSEvent) {
-        updateAppearance(isHovered: true)
-    }
-    
-    override func mouseExited(with event: NSEvent) {
-        updateAppearance(isHovered: false)
-    }
-    
-    override func mouseDown(with event: NSEvent) {
-        layer?.backgroundColor = UITheme.accent.withAlphaComponent(0.4).cgColor
-        let _ = target?.perform(action, with: self)
-    }
-}
-
 enum CaptureModeChoice: Int, CaseIterable {
     case automatic
     case display
@@ -377,12 +16,17 @@ enum CaptureModeChoice: Int, CaseIterable {
             return "Window"
         }
     }
-}
 
-enum ControlPreset: Int {
-    case performance
-    case balanced
-    case quality
+    var shortTitle: String {
+        switch self {
+        case .automatic:
+            return "Auto"
+        case .display:
+            return "Display"
+        case .window:
+            return "Window"
+        }
+    }
 }
 
 @MainActor
@@ -407,14 +51,15 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didToggleDynamicResolution enabled: Bool)
     func controlPanel(_ panel: ControlPanelView, didChangeDynamicMinimum value: Float)
     func controlPanel(_ panel: ControlPanelView, didChangeDynamicMaximum value: Float)
-    func controlPanel(_ panel: ControlPanelView, didChangeTargetPresentationFPS fps: Int)
-
     func controlPanel(_ panel: ControlPanelView, didToggleFrameGeneration enabled: Bool)
     func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationMode mode: FrameGenerationMode)
+    func controlPanel(_ panel: ControlPanelView, didToggleHUD visible: Bool)
 
     func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID)
     func controlPanelDidRequestAddProfile(_ panel: ControlPanelView)
     func controlPanelDidRequestSettings(_ panel: ControlPanelView)
+    func controlPanelDidRequestMonitor(_ panel: ControlPanelView)
+    func controlPanelDidRequestGuide(_ panel: ControlPanelView)
     func controlPanel(_ panel: ControlPanelView, didRequestRenameProfile id: UUID)
     func controlPanel(_ panel: ControlPanelView, didRequestDuplicateProfile id: UUID)
     func controlPanel(_ panel: ControlPanelView, didRequestDeleteProfile id: UUID)
@@ -425,65 +70,95 @@ final class ControlPanelView: NSView {
     weak var delegate: ControlPanelViewDelegate?
 
     private var isApplyingValues = false
+    private var isRunning = false
 
-    private let appNameLabel = NSTextField(labelWithString: "MetalDuck")
-    private let appSubtitleLabel = NSTextField(labelWithString: "Lossless Scaling for Apple Silicon")
-    private let profileTitleLabel = NSTextField(labelWithString: "Profile: \"Default\"")
+    // Header
+    private let profileTitleLabel = GlassLabel.make("Profile", font: GlassFont.largeTitle)
+    private let statusPill = StatusPill()
+    private var profileTitleRow: NSView!
+    private let profileSummaryLabel = GlassLabel.make(" ", font: GlassFont.body, color: .secondaryLabelColor)
+    private let primaryButton = GlassActionButton(title: "Start", symbol: "play.fill", style: .accent, symbolSize: 11)
 
-    private let statusDot = NSView()
-    private let statusLabel = NSTextField(labelWithString: "Stopped")
-    private let statsLabel = NSTextField(labelWithString: "SOURCE 0.0 FPS | OUT 0.0 FPS")
+    // Session
+    private let statusMessageLabel = GlassLabel.make("Ready", font: GlassFont.caption, color: .tertiaryLabelColor)
+    private let captureMetric = MetricTile(caption: "Capture", symbol: "camera.viewfinder", unit: "fps")
+    private let outputMetric = MetricTile(caption: "Output", symbol: "display", unit: "fps")
+    private let generatedMetric = MetricTile(caption: "Generated", symbol: "sparkles", unit: "fps")
+    private let resolutionMetric = MetricTile(caption: "Resolution", symbol: "aspectratio")
 
-    private let startButton = NSButton(title: "Scale", target: nil, action: nil)
-    private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
-
-    private let captureModeDropdown = CompactDropdown()
+    // Capture
+    private let captureModeControl = GlassSegmented.make(CaptureModeChoice.allCases.map(\.shortTitle))
     private let captureSourceDropdown = CompactDropdown()
-    private let refreshSourcesButton = NSButton(title: "Refresh", target: nil, action: nil)
-
-    private let captureCursorSwitch = NSSwitch()
+    private let refreshSourcesButton = GlassActionButton(title: nil, symbol: "arrow.clockwise", style: .neutral, height: 32)
+    private let sourceTitleLabel = GlassLabel.make("Window", font: GlassFont.body)
+    private let sourceIcon = GlassSymbol.view("macwindow", size: 13)
+    private let autoSourceLabel = GlassLabel.make("Frontmost window, picked automatically", font: GlassFont.body, color: .secondaryLabelColor)
+    private let sourcePicker = NSStackView()
+    private let captureCursorSwitch = GlassSwitch()
     private let captureFPSSlider = NSSlider(value: 30, minValue: 15, maxValue: 120, target: nil, action: nil)
     private let captureFPSValueLabel = NSTextField(labelWithString: "30")
     private let queueDepthSlider = NSSlider(value: 5, minValue: 1, maxValue: 8, target: nil, action: nil)
     private let queueDepthValueLabel = NSTextField(labelWithString: "5")
 
+    // Scaling
     private let upscalerDropdown = CompactDropdown()
     private let outputScaleSlider = NSSlider(value: 1.5, minValue: 0.75, maxValue: 3.0, target: nil, action: nil)
-    private let outputScaleValueLabel = NSTextField(labelWithString: "1.50x")
-    private let matchOutputResolutionSwitch = NSSwitch()
-    private let samplingDropdown = CompactDropdown()
+    private let outputScaleValueLabel = NSTextField(labelWithString: "1.50×")
+    private let matchOutputResolutionSwitch = GlassSwitch()
+    private let samplingControl = GlassSegmented.make(SamplingMode.allCases.map(\.rawValue))
     private let sharpnessSlider = NSSlider(value: 0.0, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let sharpnessValueLabel = NSTextField(labelWithString: "0.00")
 
-    private let dynamicResolutionSwitch = NSSwitch()
+    // Dynamic resolution
+    private let dynamicResolutionSwitch = GlassSwitch()
     private let dynamicMinSlider = NSSlider(value: 0.75, minValue: 0.5, maxValue: 1.0, target: nil, action: nil)
     private let dynamicMinValueLabel = NSTextField(labelWithString: "0.75")
     private let dynamicMaxSlider = NSSlider(value: 1.0, minValue: 0.6, maxValue: 1.25, target: nil, action: nil)
     private let dynamicMaxValueLabel = NSTextField(labelWithString: "1.00")
-    private let targetFPSSlider = NSSlider(value: 60, minValue: 30, maxValue: 240, target: nil, action: nil)
-    private let targetFPSValueLabel = NSTextField(labelWithString: "60")
 
-    private let frameGenerationSwitch = NSSwitch()
-    private let frameGenerationModeDropdown = CompactDropdown()
+    // Frame generation: segment 0 is "Off", the rest map onto FrameGenerationMode.
+    private let frameGenerationControl = GlassSegmented.make(["Off"] + FrameGenerationMode.allCases.map(\.title))
+    private let outputTargetLabel = GlassLabel.make("—", font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold))
+    private var resolvedTargetFPS = 0
 
-    private let profileListStack = FlippedStackView()
-    private let addProfileButton = SidebarIconButton()
-    private let duplicateProfileButton = SidebarIconButton()
-    private let renameProfileButton = SidebarIconButton()
-    private let deleteProfileButton = SidebarIconButton()
+    // Stats overlay (HUD on the output window)
+    private let hudSwitch = GlassSwitch()
+    private let hudButton = GlassActionButton(title: "Overlay", symbol: "eye", style: .neutral, symbolSize: 12)
+    private var isHUDVisible = true
 
-    private var activeProfileId: UUID?
+    private var revealViews: [NSView] = []
+    private var didReveal = false
 
-    private let backgroundGradient = CAGradientLayer()
-    private let advancedToggleButton = NSButton(title: "", target: nil, action: nil)
-    private let advancedContentStack = NSStackView()
-    private var isAdvancedVisible = false
+    // Sidebar
+    private let profileListStack = NSStackView()
+    private let profileList = SidebarListView()
+    private lazy var presetsHeader = makeSidebarHeader("Presets")
+    private lazy var customHeader = makeSidebarHeader("My Profiles", accessory: addProfileButton)
+    private let customEmptyLabel = GlassLabel.make(
+        "Use + to save the current settings",
+        font: GlassFont.caption,
+        color: .tertiaryLabelColor
+    )
+    private lazy var addProfileButton = GlassButton.icon(
+        "plus",
+        help: "New profile from current settings",
+        target: self,
+        action: #selector(handleAddProfile)
+    )
+    private weak var sidebarView: NSView?
+    private var sidebarMark: SidebarMark?
+    private weak var hoveredSidebarRow: SidebarRow?
+    private var sidebarWidthConstraint: NSLayoutConstraint?
+    private var footerRows: [SidebarRow] = []
+    private var isSidebarExpanded = false
+    private var sidebarCollapseToken = 0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        configureView()
         configureControls()
         layoutUI()
+        resetMetrics()
+        updatePrimaryButton()
     }
 
     @available(*, unavailable)
@@ -491,50 +166,48 @@ final class ControlPanelView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func layout() {
-        super.layout()
-        backgroundGradient.frame = bounds
-    }
+    // MARK: - Public API
 
     func apply(settings: RenderSettings, capture: CaptureConfiguration, profileName: String) {
         isApplyingValues = true
 
-        profileTitleLabel.stringValue = "Profile: \"\(profileName)\""
+        GlassMotion.crossfade(profileTitleLabel, to: profileName, duration: 0.3)
         upscalerDropdown.selectItem(withTitle: settings.upscalingAlgorithm.rawValue)
         outputScaleSlider.floatValue = settings.outputScale
-        outputScaleValueLabel.stringValue = String(format: "%.2fx", settings.outputScale)
-        matchOutputResolutionSwitch.state = settings.matchOutputResolution ? .on : .off
-
-        samplingDropdown.selectItem(withTitle: settings.samplingMode.rawValue)
-
+        outputScaleValueLabel.stringValue = String(format: "%.2f×", settings.outputScale)
+        matchOutputResolutionSwitch.isOn = settings.matchOutputResolution
+        samplingControl.selectedSegment = SamplingMode.allCases.firstIndex(of: settings.samplingMode) ?? 0
         sharpnessSlider.floatValue = settings.sharpness
         sharpnessValueLabel.stringValue = String(format: "%.2f", settings.sharpness)
 
-        dynamicResolutionSwitch.state = settings.dynamicResolutionEnabled ? .on : .off
+        dynamicResolutionSwitch.isOn = settings.dynamicResolutionEnabled
         dynamicMinSlider.floatValue = settings.dynamicScaleMinimum
         dynamicMaxSlider.floatValue = settings.dynamicScaleMaximum
         dynamicMinValueLabel.stringValue = String(format: "%.2f", settings.dynamicScaleMinimum)
         dynamicMaxValueLabel.stringValue = String(format: "%.2f", settings.dynamicScaleMaximum)
+        applyOutputTarget(captureFPS: capture.framesPerSecond, settings: settings)
 
-        targetFPSSlider.integerValue = settings.targetPresentationFPS
-        targetFPSValueLabel.stringValue = "\(settings.targetPresentationFPS)"
+        if settings.frameGenerationEnabled,
+           let index = FrameGenerationMode.allCases.firstIndex(of: settings.frameGenerationMode) {
+            frameGenerationControl.selectedSegment = index + 1
+        } else {
+            frameGenerationControl.selectedSegment = 0
+        }
 
-        frameGenerationSwitch.state = settings.frameGenerationEnabled ? .on : .off
-        frameGenerationModeDropdown.selectItem(withTitle: settings.frameGenerationMode.rawValue)
-
-        captureCursorSwitch.state = capture.showsCursor ? .on : .off
+        captureCursorSwitch.isOn = capture.showsCursor
         captureFPSSlider.integerValue = capture.framesPerSecond
-        captureFPSValueLabel.stringValue = "\(capture.framesPerSecond)"
+        captureFPSValueLabel.stringValue = "\(capture.framesPerSecond) fps"
         queueDepthSlider.integerValue = capture.queueDepth
         queueDepthValueLabel.stringValue = "\(capture.queueDepth)"
 
-        syncDynamicControlsEnabledState()
-
+        syncDependentControls()
+        refreshSummary()
         isApplyingValues = false
     }
 
     func setCaptureMode(_ mode: CaptureModeChoice) {
-        captureModeDropdown.selectItem(at: mode.rawValue)
+        captureModeControl.selectedSegment = mode.rawValue
+        updateSourceRow(for: mode, animated: false)
     }
 
     func setCaptureSourceTitles(_ titles: [String], selectedIndex: Int?) {
@@ -547,1006 +220,931 @@ final class ControlPanelView: NSView {
 
         captureSourceDropdown.isEnabled = true
         captureSourceDropdown.items = titles
-
-        if let selectedIndex, selectedIndex >= 0, selectedIndex < titles.count {
+        if let selectedIndex, titles.indices.contains(selectedIndex) {
             captureSourceDropdown.selectItem(at: selectedIndex)
         }
     }
 
+    func setHUDVisible(_ visible: Bool) {
+        isHUDVisible = visible
+        hudSwitch.isOn = visible
+        updateHUDButton()
+    }
+
     func setRunning(_ running: Bool) {
-        startButton.isEnabled = !running
-        stopButton.isEnabled = running
-
-        startButton.alphaValue = running ? 0.75 : 1.0
-        stopButton.alphaValue = running ? 1.0 : 0.75
-
-        if running {
-            statusLabel.textColor = UITheme.accent
-            statusDot.layer?.backgroundColor = UITheme.accent.cgColor
-        } else {
-            statusLabel.textColor = UITheme.muted
-            statusDot.layer?.backgroundColor = UITheme.muted.cgColor
+        let changed = running != isRunning
+        isRunning = running
+        GlassAccent.isLive = running
+        statusPill.set(running ? .running : .idle)
+        updatePrimaryButton(animated: changed)
+        applySliderAccent()
+        updateHUDButton(animated: false)
+        if changed && running {
+            primaryButton.ripple(color: GlassAccent.live)
+        }
+        if !running {
+            resetMetrics()
         }
     }
 
     func setStatus(_ message: String, isError: Bool = false) {
-        statusLabel.stringValue = message
-        if isError {
-            statusLabel.textColor = NSColor.systemRed
-            statusDot.layer?.backgroundColor = NSColor.systemRed.cgColor
-        } else if stopButton.isEnabled {
-            statusLabel.textColor = UITheme.accent
-            statusDot.layer?.backgroundColor = UITheme.accent.cgColor
-        } else {
-            statusLabel.textColor = UITheme.muted
-            statusDot.layer?.backgroundColor = UITheme.muted.cgColor
+        statusMessageLabel.stringValue = message
+        statusMessageLabel.toolTip = message
+        statusMessageLabel.textColor = isError ? .systemRed : .tertiaryLabelColor
+        statusPill.set(isError ? .error : (isRunning ? .running : .idle))
+    }
+
+    func setStats(_ stats: RendererStats) {
+        captureMetric.set(value: String(format: "%.1f", stats.captureFPS))
+        outputMetric.set(value: String(format: "%.1f", stats.presentFPS))
+        generatedMetric.set(
+            value: String(format: "%.1f", stats.generatedFPS),
+            detail: stats.frameGenerationEnabled ? nil : "Frame generation off"
+        )
+        resolutionMetric.set(
+            value: "\(Int(stats.inputSize.width))×\(Int(stats.inputSize.height))",
+            detail: String(
+                format: "→ %d×%d  ·  %.2f×",
+                Int(stats.outputSize.width),
+                Int(stats.outputSize.height),
+                stats.effectiveScale
+            )
+        )
+    }
+
+    func setProfiles(_ profiles: [Profile], activeId: UUID) {
+        profileListStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        let presets = profiles.filter(\.isBuiltIn)
+        let custom = profiles.filter { !$0.isBuiltIn }
+
+        addToProfileList(presetsHeader)
+        presets.forEach { addToProfileList(makeProfileRow($0, activeId: activeId)) }
+
+        addToProfileList(customHeader)
+        profileListStack.setCustomSpacing(4, after: customHeader)
+        if let lastPreset = profileListStack.arrangedSubviews.dropLast().last {
+            profileListStack.setCustomSpacing(isSidebarExpanded ? 18 : 4, after: lastPreset)
         }
+        if custom.isEmpty {
+            customEmptyLabel.isHidden = !isSidebarExpanded
+            addToProfileList(customEmptyLabel, inset: 10)
+        } else {
+            custom.forEach { addToProfileList(makeProfileRow($0, activeId: activeId)) }
+        }
+
+        let selected = profileListStack.arrangedSubviews
+            .compactMap { $0 as? SidebarRow }
+            .first { $0.isSelected }
+        profileList.select(selected, animated: true)
     }
 
-    func setStats(_ message: String) {
-        statsLabel.stringValue = message
-    }
-
-    private func configureView() {
-        wantsLayer = true
-        layer?.masksToBounds = true
-
-        backgroundGradient.colors = [UITheme.bgTop.cgColor, UITheme.bgBottom.cgColor]
-        backgroundGradient.locations = [0.0, 1.0]
-        backgroundGradient.startPoint = CGPoint(x: 0.0, y: 1.0)
-        backgroundGradient.endPoint = CGPoint(x: 1.0, y: 0.0)
-        layer?.addSublayer(backgroundGradient)
-    }
+    // MARK: - Configuration
 
     private func configureControls() {
-        appNameLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
-        appNameLabel.textColor = UITheme.title
+        primaryButton.target = self
+        primaryButton.action = #selector(handlePrimaryTapped)
+        primaryButton.widthAnchor.constraint(equalToConstant: 112).isActive = true
 
-        appSubtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-        appSubtitleLabel.textColor = UITheme.muted.withAlphaComponent(0.7)
+        captureModeControl.selectedSegment = CaptureModeChoice.automatic.rawValue
+        captureModeControl.target = self
+        captureModeControl.action = #selector(handleCaptureModeChanged)
 
-        profileTitleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
-        profileTitleLabel.textColor = UITheme.title
-
-        statusDot.translatesAutoresizingMaskIntoConstraints = false
-        statusDot.wantsLayer = true
-        statusDot.layer?.cornerRadius = 4
-        statusDot.layer?.backgroundColor = UITheme.muted.cgColor
-        NSLayoutConstraint.activate([
-            statusDot.widthAnchor.constraint(equalToConstant: 8),
-            statusDot.heightAnchor.constraint(equalToConstant: 8)
-        ])
-
-        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 24, weight: .semibold)
-        statusLabel.textColor = UITheme.muted
-
-        statsLabel.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
-        statsLabel.textColor = UITheme.body
-        statsLabel.lineBreakMode = .byWordWrapping
-
-        startButton.bezelStyle = .rounded
-        startButton.wantsLayer = true
-        startButton.isBordered = false
-        startButton.layer?.cornerRadius = 8
-        startButton.layer?.backgroundColor = UITheme.accent.cgColor
-        startButton.contentTintColor = .white
-        startButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        startButton.translatesAutoresizingMaskIntoConstraints = false
-        startButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
-        startButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
-
-        stopButton.bezelStyle = .rounded
-        stopButton.wantsLayer = true
-        stopButton.isBordered = false
-        stopButton.layer?.cornerRadius = 8
-        stopButton.layer?.backgroundColor = NSColor(calibratedRed: 0.20, green: 0.21, blue: 0.25, alpha: 1.0).cgColor
-        stopButton.contentTintColor = UITheme.body
-        stopButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        stopButton.isEnabled = false
-        stopButton.alphaValue = 0.75
-        stopButton.translatesAutoresizingMaskIntoConstraints = false
-        stopButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
-        stopButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
-
-        refreshSourcesButton.bezelStyle = .rounded
-        refreshSourcesButton.wantsLayer = true
-        refreshSourcesButton.isBordered = false
-        refreshSourcesButton.layer?.cornerRadius = 6
-        refreshSourcesButton.layer?.backgroundColor = UITheme.card.cgColor
-        refreshSourcesButton.layer?.borderWidth = 1
-        refreshSourcesButton.layer?.borderColor = UITheme.cardBorder.cgColor
-        refreshSourcesButton.contentTintColor = UITheme.body
-        refreshSourcesButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        refreshSourcesButton.translatesAutoresizingMaskIntoConstraints = false
-        refreshSourcesButton.heightAnchor.constraint(equalToConstant: 26).isActive = true
-        refreshSourcesButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 70).isActive = true
-
-        // CompactDropdown configuration
-        captureModeDropdown.items = CaptureModeChoice.allCases.map(\.title)
-        captureModeDropdown.selectItem(at: CaptureModeChoice.automatic.rawValue)
-        captureModeDropdown.onSelectionChanged = { [weak self] _, index in
-            guard let self, !self.isApplyingValues,
-                  let mode = CaptureModeChoice(rawValue: index) else { return }
-            self.delegate?.controlPanel(self, didSelectCaptureMode: mode)
-        }
-
+        captureSourceDropdown.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         captureSourceDropdown.onSelectionChanged = { [weak self] _, index in
             guard let self, !self.isApplyingValues else { return }
             self.delegate?.controlPanel(self, didSelectCaptureSourceAt: index)
         }
+        refreshSourcesButton.toolTip = "Refresh windows and displays"
+        refreshSourcesButton.setAccessibilityLabel("Refresh windows and displays")
+        refreshSourcesButton.target = self
+        refreshSourcesButton.action = #selector(handleRefreshSources)
 
         upscalerDropdown.items = UpscalingAlgorithm.allCases.map(\.rawValue)
         upscalerDropdown.onSelectionChanged = { [weak self] title, _ in
             guard let self, !self.isApplyingValues,
                   let value = UpscalingAlgorithm(rawValue: title) else { return }
+            self.refreshSummary()
             self.delegate?.controlPanel(self, didChangeUpscalingAlgorithm: value)
         }
 
-        samplingDropdown.items = SamplingMode.allCases.map(\.rawValue)
-        samplingDropdown.onSelectionChanged = { [weak self] title, _ in
-            guard let self, !self.isApplyingValues,
-                  let value = SamplingMode(rawValue: title) else { return }
-            self.delegate?.controlPanel(self, didChangeSamplingMode: value)
+        samplingControl.target = self
+        samplingControl.action = #selector(handleSamplingChanged)
+
+        frameGenerationControl.target = self
+        frameGenerationControl.action = #selector(handleFrameGenerationChanged)
+
+        for control in [frameGenerationControl, samplingControl, upscalerDropdown] as [NSView] {
+            control.widthAnchor.constraint(equalToConstant: GlassMetrics.controlWidth).isActive = true
         }
 
-        frameGenerationModeDropdown.items = FrameGenerationMode.allCases.map(\.rawValue)
-        frameGenerationModeDropdown.onSelectionChanged = { [weak self] title, _ in
-            guard let self, !self.isApplyingValues,
-                  let mode = FrameGenerationMode(rawValue: title) else { return }
-            self.delegate?.controlPanel(self, didChangeFrameGenerationMode: mode)
+        hudButton.target = self
+        hudButton.action = #selector(handleHUDButton)
+        hudButton.widthAnchor.constraint(equalToConstant: 112).isActive = true
+        updateHUDButton(animated: false)
+
+        let switches: [(GlassSwitch, Selector)] = [
+            (captureCursorSwitch, #selector(handleCursorCaptureChanged)),
+            (matchOutputResolutionSwitch, #selector(handleMatchOutputResolutionChanged)),
+            (dynamicResolutionSwitch, #selector(handleDynamicResolutionChanged)),
+            (hudSwitch, #selector(handleHUDSwitch))
+        ]
+        for (control, action) in switches {
+            control.controlSize = .small
+            control.target = self
+            control.action = action
         }
 
-        // Switch configuration
-        [captureCursorSwitch, matchOutputResolutionSwitch, frameGenerationSwitch, dynamicResolutionSwitch].forEach {
-            $0.controlSize = .regular
-            $0.state = .off
+        let sliders: [(NSSlider, Selector)] = [
+            (captureFPSSlider, #selector(handleCaptureFPSChanged)),
+            (queueDepthSlider, #selector(handleQueueDepthChanged)),
+            (outputScaleSlider, #selector(handleOutputScaleChanged)),
+            (sharpnessSlider, #selector(handleSharpnessChanged)),
+            (dynamicMinSlider, #selector(handleDynamicMinChanged)),
+            (dynamicMaxSlider, #selector(handleDynamicMaxChanged))
+        ]
+        for (control, action) in sliders {
+            control.target = self
+            control.action = action
         }
-
-        [captureFPSSlider, queueDepthSlider, outputScaleSlider, sharpnessSlider, dynamicMinSlider, dynamicMaxSlider, targetFPSSlider].forEach {
-            $0.controlSize = .regular
-        }
-
-        startButton.target = self
-        startButton.action = #selector(handleStartTapped)
-
-        stopButton.target = self
-        stopButton.action = #selector(handleStopTapped)
-
-        refreshSourcesButton.target = self
-        refreshSourcesButton.action = #selector(handleRefreshSources)
-
-        captureCursorSwitch.target = self
-        captureCursorSwitch.action = #selector(handleCursorCaptureChanged)
-
-        captureFPSSlider.target = self
-        captureFPSSlider.action = #selector(handleCaptureFPSChanged)
-
-        queueDepthSlider.target = self
-        queueDepthSlider.action = #selector(handleQueueDepthChanged)
-
-        outputScaleSlider.target = self
-        outputScaleSlider.action = #selector(handleOutputScaleChanged)
-
-        matchOutputResolutionSwitch.target = self
-        matchOutputResolutionSwitch.action = #selector(handleMatchOutputResolutionChanged)
-
-        sharpnessSlider.target = self
-        sharpnessSlider.action = #selector(handleSharpnessChanged)
-
-        dynamicResolutionSwitch.target = self
-        dynamicResolutionSwitch.action = #selector(handleDynamicResolutionChanged)
-
-        dynamicMinSlider.target = self
-        dynamicMinSlider.action = #selector(handleDynamicMinChanged)
-
-        dynamicMaxSlider.target = self
-        dynamicMaxSlider.action = #selector(handleDynamicMaxChanged)
-
-        targetFPSSlider.target = self
-        targetFPSSlider.action = #selector(handleTargetFPSChanged)
-
-        frameGenerationSwitch.action = #selector(handleFrameGenerationEnabledChanged)
-
-        addProfileButton.target = self
-        addProfileButton.action = #selector(handleAddProfile)
-        
-        duplicateProfileButton.target = self
-        duplicateProfileButton.action = #selector(handleDuplicateProfile)
-        
-        renameProfileButton.target = self
-        renameProfileButton.action = #selector(handleRenameProfile)
-        
-        deleteProfileButton.target = self
-        deleteProfileButton.action = #selector(handleDeleteProfile)
-
-
-        advancedToggleButton.bezelStyle = .inline
-        advancedToggleButton.isBordered = false
-        advancedToggleButton.contentTintColor = UITheme.muted
-        
-        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
-        advancedToggleButton.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Show")?.withSymbolConfiguration(config)
-        advancedToggleButton.imagePosition = .imageOnly
-        
-        advancedToggleButton.target = self
-        advancedToggleButton.action = #selector(handleAdvancedToggle)
+        applySliderAccent()
     }
+
+    private func applySliderAccent() {
+        let color = GlassAccent.color
+        for slider in [captureFPSSlider, queueDepthSlider, outputScaleSlider, sharpnessSlider, dynamicMinSlider, dynamicMaxSlider] {
+            slider.trackFillColor = color
+        }
+    }
+
+    // MARK: - Layout
 
     private func layoutUI() {
-        let topBar = makeTopBar()
+        let backdrop = WindowBackdropView()
+        addSubview(backdrop)
+        pin(backdrop, to: self)
+
         let sidebar = makeSidebar()
-        let main = makeMainContent()
+        let header = makeHeader()
+        let session = makeSessionCard()
+        let sections = makeSections()
+        let mark = SidebarMark()
+        sidebarMark = mark
 
-        let body = NSStackView(views: [sidebar, main])
-        body.translatesAutoresizingMaskIntoConstraints = false
-        body.orientation = .horizontal
-        body.alignment = .top
-        body.distribution = .fill
-        body.spacing = 20
+        addSubview(sidebar)
+        addSubview(header)
+        addSubview(mark)
+        addSubview(session)
+        addSubview(sections)
 
-        addSubview(topBar)
-        addSubview(body)
-
+        let inset = GlassMetrics.windowInset
+        let content = GlassMetrics.contentInset
+        let sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: GlassMetrics.sidebarCollapsedWidth)
+        sidebarWidthConstraint = sidebarWidth
+        sidebarView = sidebar
+        sidebar.addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: [Self.sidebarTrackingKey: true]
+        ))
         NSLayoutConstraint.activate([
-            topBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            topBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            topBar.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            topBar.heightAnchor.constraint(equalToConstant: 68),
+            sidebar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            // Share the card column's top and bottom, so the rail is not taller than the panels.
+            sidebar.topAnchor.constraint(equalTo: session.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: sections.bottomAnchor),
+            sidebarWidth,
 
-            body.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-            body.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
-            body.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 14),
-            body.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14)
+            header.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: content),
+            header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -content),
+            header.topAnchor.constraint(equalTo: topAnchor, constant: 28),
+
+            // Sit on the profile name and its status, not on the line underneath.
+            mark.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            mark.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            mark.centerYAnchor.constraint(equalTo: profileTitleLabel.centerYAnchor, constant: 2),
+
+            session.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            session.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            session.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16),
+
+            sections.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            sections.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            sections.topAnchor.constraint(equalTo: session.bottomAnchor, constant: GlassMetrics.sectionSpacing),
+            // The window height follows the content, so the cards always end
+            // level with the sidebar instead of leaving an empty band.
+            sections.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset)
         ])
+        applySidebarState(animated: false)
     }
 
-    private func makeTopBar() -> NSView {
-        let container = NSVisualEffectView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.material = .underWindowBackground
-        container.blendingMode = .withinWindow
-        container.state = .active
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 12
-        container.layer?.borderWidth = 0
+    // MARK: - Sidebar expand on hover
 
-        let titleBlock = NSStackView(views: [appNameLabel, appSubtitleLabel])
-        titleBlock.orientation = .vertical
-        titleBlock.spacing = 1
+    private static let sidebarTrackingKey = "sidebar"
 
-        let actions = NSStackView(views: [startButton, stopButton])
-        actions.orientation = .horizontal
-        actions.spacing = 8
+    override func mouseEntered(with event: NSEvent) {
+        guard event.trackingArea?.userInfo?[Self.sidebarTrackingKey] != nil else {
+            super.mouseEntered(with: event)
+            return
+        }
+        sidebarCollapseToken += 1
+        setSidebarExpanded(true)
+        updateSidebarHover(at: event)
+    }
 
-        let row = NSStackView(views: [titleBlock, NSView(), actions])
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.orientation = .horizontal
-        row.alignment = .centerY
+    override func mouseMoved(with event: NSEvent) {
+        guard event.trackingArea?.userInfo?[Self.sidebarTrackingKey] != nil else {
+            super.mouseMoved(with: event)
+            return
+        }
+        updateSidebarHover(at: event)
+    }
 
-        container.addSubview(row)
+    override func mouseExited(with event: NSEvent) {
+        guard event.trackingArea?.userInfo?[Self.sidebarTrackingKey] != nil else {
+            super.mouseExited(with: event)
+            return
+        }
+        hoveredSidebarRow?.setPointerInside(false)
+        hoveredSidebarRow = nil
+        sidebarCollapseToken += 1
+        let token = sidebarCollapseToken
+        // A short grace period, so brushing past the edge does not snap it shut.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, token == self.sidebarCollapseToken, !self.isMouseInSidebar else { return }
+                self.setSidebarExpanded(false)
+            }
+        }
+    }
 
-        NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            row.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-            row.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10)
-        ])
+    /// Lights up the row under the pointer and plays its icon effect. Row tracking
+    /// alone misses these buttons, so the sidebar follows the pointer itself.
+    private func updateSidebarHover(at event: NSEvent) {
+        let hit = hitTest(convert(event.locationInWindow, from: nil))
+        var row: SidebarRow?
+        var view = hit
+        while let current = view {
+            if let found = current as? SidebarRow {
+                row = found
+                break
+            }
+            view = current.superview
+        }
+        guard row !== hoveredSidebarRow else { return }
+        hoveredSidebarRow?.setPointerInside(false)
+        hoveredSidebarRow = row
+        row?.setPointerInside(true)
+    }
 
-        return container
+    private var isMouseInSidebar: Bool {
+        guard let window, let sidebarView else { return false }
+        let point = sidebarView.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        return sidebarView.bounds.contains(point)
+    }
+
+    private func setSidebarExpanded(_ expanded: Bool) {
+        guard expanded != isSidebarExpanded else { return }
+        isSidebarExpanded = expanded
+        applySidebarState(animated: !GlassMotion.reduceMotion && window != nil)
+    }
+
+    /// Collapsed shows icons only; expanding widens the sidebar and pushes the content right.
+    private func applySidebarState(animated: Bool) {
+        let expanded = isSidebarExpanded
+        let width = expanded ? GlassMetrics.sidebarWidth : GlassMetrics.sidebarCollapsedWidth
+        let rows = profileListStack.arrangedSubviews.compactMap { $0 as? SidebarRow } + footerRows
+        let apply = { [self] in
+            if animated {
+                sidebarWidthConstraint?.animator().constant = width
+                customEmptyLabel.animator().alphaValue = expanded ? 1 : 0
+            } else {
+                sidebarWidthConstraint?.constant = width
+                customEmptyLabel.alphaValue = expanded ? 1 : 0
+            }
+            rows.forEach { $0.setTitleVisible(expanded, animated: animated) }
+            presetsHeader.setCompact(!expanded, animated: animated)
+            customHeader.setCompact(!expanded, animated: animated)
+            sidebarMark?.setExpanded(expanded, animated: animated)
+            customEmptyLabel.isHidden = !expanded
+            if let index = profileListStack.arrangedSubviews.firstIndex(of: customHeader), index > 0 {
+                let above = profileListStack.arrangedSubviews[index - 1]
+                profileListStack.setCustomSpacing(expanded ? 18 : 4, after: above)
+            }
+        }
+        guard animated else {
+            apply()
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = expanded ? 0.34 : 0.28
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 1, 0.35, 1)
+            apply()
+        }
     }
 
     private func makeSidebar() -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.wantsLayer = true
-        container.layer?.cornerRadius = 12
-        container.layer?.borderWidth = 0
-        container.layer?.backgroundColor = UITheme.sidebar.cgColor
+        let surface = GlassSurface(style: .sidebar, cornerRadius: GlassMetrics.sidebarRadius)
 
-        // 1. Profiles title — pinned to top
-        let title = NSTextField(labelWithString: "Profiles")
-        title.translatesAutoresizingMaskIntoConstraints = false
-        title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
-        title.textColor = UITheme.title
-
-        // 2. Action buttons — pinned directly under title
-        let actionsContainer = NSStackView(views: [
-            setupSidebarButton(addProfileButton, symbol: "plus"),
-            setupSidebarButton(duplicateProfileButton, symbol: "plus.square.on.square"),
-            setupSidebarButton(renameProfileButton, symbol: "pencil"),
-            setupSidebarButton(deleteProfileButton, symbol: "trash")
-        ])
-        actionsContainer.translatesAutoresizingMaskIntoConstraints = false
-        actionsContainer.orientation = .horizontal
-        actionsContainer.spacing = 8
-
-        // Header block: title + buttons, fixed at top
-        let headerStack = NSStackView(views: [title, actionsContainer])
-        headerStack.translatesAutoresizingMaskIntoConstraints = false
-        headerStack.orientation = .vertical
-        headerStack.alignment = .leading
-        headerStack.spacing = 14
-        headerStack.setContentHuggingPriority(.required, for: .vertical)
-
-        let headerDivider = NSView()
-        headerDivider.translatesAutoresizingMaskIntoConstraints = false
-        headerDivider.wantsLayer = true
-        headerDivider.layer?.backgroundColor = UITheme.cardBorder.withAlphaComponent(0.4).cgColor
-        headerDivider.heightAnchor.constraint(equalToConstant: 1).isActive = true
-
-
-        // 3. Profiles list — inside a scroll view that fills remaining space
+        profileListStack.translatesAutoresizingMaskIntoConstraints = false
         profileListStack.orientation = .vertical
         profileListStack.alignment = .leading
         profileListStack.spacing = 4
-        profileListStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let scrollView = NSScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.autohidesScrollers = true
-        scrollView.documentView = profileListStack
+        let listDocument = profileList
+        listDocument.translatesAutoresizingMaskIntoConstraints = false
+        listDocument.addSubview(profileListStack)
 
-        // 4. Footer items
-        let divider = NSView()
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        divider.wantsLayer = true
-        divider.layer?.backgroundColor = UITheme.cardBorder.withAlphaComponent(0.4).cgColor
-        divider.heightAnchor.constraint(equalToConstant: 1).isActive = true
+        let listScroll = NSScrollView()
+        listScroll.translatesAutoresizingMaskIntoConstraints = false
+        listScroll.drawsBackground = false
+        listScroll.hasVerticalScroller = true
+        listScroll.autohidesScrollers = true
+        listScroll.documentView = listDocument
 
-        let settingsButton = SidebarIconButton()
-        settingsButton.drawsBackground = false
-        settingsButton.translatesAutoresizingMaskIntoConstraints = false
-        
-        let gearConfig = NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-        let gearIcon = NSImageView()
-        gearIcon.image = NSImage(systemSymbolName: "gearshape.fill", accessibilityDescription: "Settings")?.withSymbolConfiguration(gearConfig)
-        gearIcon.contentTintColor = UITheme.body
-        gearIcon.translatesAutoresizingMaskIntoConstraints = false
-        
-        let settingsLabel = NSTextField(labelWithString: "Settings")
-        settingsLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-        settingsLabel.textColor = UITheme.body
-        
-        let contentStack = NSStackView(views: [gearIcon, settingsLabel])
-        contentStack.orientation = .horizontal
-        contentStack.spacing = 8
-        contentStack.translatesAutoresizingMaskIntoConstraints = false
-        
-        settingsButton.addSubview(contentStack)
-        let leadingConstraint = contentStack.leadingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: 12)
-        leadingConstraint.isActive = true
-        contentStack.centerYAnchor.constraint(equalTo: settingsButton.centerYAnchor).isActive = true
-        
-        settingsButton.onHover = { [weak settingsButton, weak contentStack, weak leadingConstraint] hovered in
-            guard let _ = settingsButton, let stack = contentStack, let constraint = leadingConstraint else { return }
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.3
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                
-                if hovered {
-                    // Center it: (ButtonWidth - ContentWidth) / 2
-                    // Button is 140 wide, content is ~80 wide.
-                    let buttonWidth: CGFloat = 140
-                    let contentWidth = stack.fittingSize.width
-                    constraint.animator().constant = (buttonWidth - contentWidth) / 2
-                    settingsLabel.animator().textColor = UITheme.title
-                    gearIcon.animator().contentTintColor = UITheme.title
-                } else {
-                    constraint.animator().constant = 12
-                    settingsLabel.animator().textColor = UITheme.body
-                    gearIcon.animator().contentTintColor = UITheme.body
+        let guideRow = SidebarRow(title: "Guide", symbol: "book.closed")
+        guideRow.toolTip = "What each control changes"
+        guideRow.onHover = { [weak guideRow] in
+            guard !GlassMotion.reduceMotion else { return }
+            guideRow?.icon.addSymbolEffect(.bounce, options: .nonRepeating)
+        }
+        guideRow.onClick = { [weak self] in
+            guard let self else { return }
+            self.delegate?.controlPanelDidRequestGuide(self)
+        }
+        let monitorRow = SidebarRow(title: "Monitor", symbol: "waveform.path.ecg.rectangle")
+        monitorRow.toolTip = "Live charts, load and the event log"
+        monitorRow.onHover = { [weak monitorRow] in
+            guard !GlassMotion.reduceMotion else { return }
+            monitorRow?.icon.addSymbolEffect(.variableColor.iterative, options: .nonRepeating)
+        }
+        monitorRow.onClick = { [weak self] in
+            guard let self else { return }
+            self.delegate?.controlPanelDidRequestMonitor(self)
+        }
+        let settingsRow = SidebarRow(title: "Settings", symbol: "gearshape")
+        settingsRow.onHover = { [weak settingsRow] in
+            guard !GlassMotion.reduceMotion else { return }
+            settingsRow?.icon.addSymbolEffect(.rotate, options: .nonRepeating)
+        }
+        settingsRow.onClick = { [weak self] in
+            guard let self else { return }
+            self.delegate?.controlPanelDidRequestSettings(self)
+        }
+
+        footerRows = [guideRow, monitorRow, settingsRow]
+        let footer = NSStackView(views: [guideRow, monitorRow, settingsRow])
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        footer.orientation = .vertical
+        footer.alignment = .leading
+        footer.spacing = 4
+
+        let container = surface.contentView
+        container.addSubview(listScroll)
+        container.addSubview(footer)
+
+        NSLayoutConstraint.activate([
+            listScroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            listScroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            listScroll.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            listScroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
+
+            listDocument.leadingAnchor.constraint(equalTo: listScroll.contentView.leadingAnchor),
+            listDocument.trailingAnchor.constraint(equalTo: listScroll.contentView.trailingAnchor),
+            listDocument.topAnchor.constraint(equalTo: listScroll.contentView.topAnchor),
+            profileListStack.leadingAnchor.constraint(equalTo: listDocument.leadingAnchor),
+            profileListStack.trailingAnchor.constraint(equalTo: listDocument.trailingAnchor),
+            profileListStack.topAnchor.constraint(equalTo: listDocument.topAnchor),
+            profileListStack.bottomAnchor.constraint(equalTo: listDocument.bottomAnchor),
+
+            footer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            footer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10)
+        ])
+        for view in footer.arrangedSubviews {
+            view.leadingAnchor.constraint(equalTo: footer.leadingAnchor).isActive = true
+            view.trailingAnchor.constraint(equalTo: footer.trailingAnchor).isActive = true
+        }
+
+        return surface
+    }
+
+    private func makeSidebarHeader(_ title: String, accessory: NSView? = nil) -> SidebarHeaderView {
+        SidebarHeaderView(title: title, accessory: accessory)
+    }
+
+    private func makeProfileRow(_ profile: Profile, activeId: UUID) -> SidebarRow {
+        let row = SidebarRow(title: profile.name, symbol: profile.symbolName)
+        row.drawsSelectionBackground = false
+        row.isSelected = profile.id == activeId
+        row.setTitleVisible(isSidebarExpanded, animated: false)
+        row.toolTip = profile.isBuiltIn ? "Built-in preset · right-click for more" : "Right-click to rename or delete"
+        row.onClick = { [weak self] in
+            guard let self else { return }
+            self.delegate?.controlPanel(self, didSelectProfile: profile.id)
+        }
+        row.menu = makeProfileMenu(for: profile)
+        return row
+    }
+
+    private func addToProfileList(_ view: NSView, inset: CGFloat = 0) {
+        profileListStack.addArrangedSubview(view)
+        view.leadingAnchor.constraint(equalTo: profileListStack.leadingAnchor, constant: inset).isActive = true
+        view.trailingAnchor.constraint(equalTo: profileListStack.trailingAnchor).isActive = true
+    }
+
+    private func makeHeader() -> NSView {
+        profileTitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        profileSummaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let titleRow = NSStackView(views: [profileTitleLabel, statusPill])
+        titleRow.orientation = .horizontal
+        titleRow.alignment = .centerY
+        titleRow.spacing = 10
+        profileTitleRow = titleRow
+
+        let titles = NSStackView(views: [titleRow, profileSummaryLabel])
+        titles.orientation = .vertical
+        titles.alignment = .leading
+        titles.spacing = 4
+
+        let header = NSStackView(views: [titles, NSView(), hudButton, primaryButton])
+        header.translatesAutoresizingMaskIntoConstraints = false
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 16
+        header.setCustomSpacing(10, after: hudButton)
+        return header
+    }
+
+    private func makeSessionCard() -> NSView {
+        let surface = GlassSurface()
+
+        let metrics = NSStackView(views: [captureMetric, outputMetric, generatedMetric, resolutionMetric])
+        metrics.translatesAutoresizingMaskIntoConstraints = false
+        metrics.orientation = .horizontal
+        metrics.distribution = .fillEqually
+        metrics.spacing = 16
+
+        statusMessageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let stack = NSStackView(views: [metrics, statusMessageLabel])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        surface.contentView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: surface.contentView.leadingAnchor, constant: 18),
+            stack.trailingAnchor.constraint(equalTo: surface.contentView.trailingAnchor, constant: -18),
+            stack.topAnchor.constraint(equalTo: surface.contentView.topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(equalTo: surface.contentView.bottomAnchor, constant: -10),
+            metrics.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            metrics.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            statusMessageLabel.trailingAnchor.constraint(lessThanOrEqualTo: stack.trailingAnchor)
+        ])
+        return surface
+    }
+
+    private func makeSections() -> NSView {
+        let groups = [makeCaptureGroup(), makeFrameGenerationGroup(), makeScalingGroup(), makeDynamicResolutionGroup()]
+        let leftColumn = makeColumn([groups[0], groups[1]])
+        let rightColumn = makeColumn([groups[2], groups[3]])
+        revealViews.append(contentsOf: [groups[0], groups[2], groups[1], groups[3]])
+
+        let columns = NSStackView(views: [leftColumn, rightColumn])
+        columns.translatesAutoresizingMaskIntoConstraints = false
+        columns.orientation = .horizontal
+        columns.alignment = .top
+        columns.distribution = .fillEqually
+        columns.spacing = GlassMetrics.columnSpacing
+        columns.setHuggingPriority(.required, for: .vertical)
+        return columns
+    }
+
+    private func makeColumn(_ groups: [NSView]) -> NSView {
+        let column = NSStackView(views: groups)
+        column.translatesAutoresizingMaskIntoConstraints = false
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = GlassMetrics.sectionSpacing
+        column.setHuggingPriority(.required, for: .vertical)
+        for group in groups {
+            group.leadingAnchor.constraint(equalTo: column.leadingAnchor).isActive = true
+            group.trailingAnchor.constraint(equalTo: column.trailingAnchor).isActive = true
+        }
+        return column
+    }
+
+    private func makeCaptureGroup() -> NSView {
+        let group = SettingsGroup(title: "Capture", symbol: "camera.viewfinder")
+
+        let modeIcon = GlassSymbol.view("rectangle.on.rectangle", size: 13)
+        let modeTitle = GlassLabel.make("Mode", font: GlassFont.body)
+        modeTitle.toolTip = "Capture a window, a whole display, or let MetalDuck pick."
+        group.addRow(makeWideRow(icon: modeIcon, title: modeTitle, control: captureModeControl))
+        group.addRow(makeWideRow(icon: sourceIcon, title: sourceTitleLabel, control: sourcePicker))
+        configureSourcePicker()
+        group.addRow(SettingRow.control("Show cursor", symbol: "cursorarrow", control: captureCursorSwitch))
+        group.addRow(SettingRow.slider("Capture rate", symbol: "timer", help: "Expected cadence of the source.", slider: captureFPSSlider, value: captureFPSValueLabel))
+        group.addRow(SettingRow.slider("Queue depth", symbol: "square.stack.3d.up", help: "Buffered frames. Higher is steadier, lower has less latency.", slider: queueDepthSlider, value: queueDepthValueLabel))
+        return group
+    }
+
+    /// Row with a fixed title column and a control that fills the rest, so the
+    /// mode selector and the source picker share both edges.
+    private func makeWideRow(icon: NSImageView, title: NSTextField, control: NSView) -> NSView {
+        icon.imageScaling = .scaleProportionallyDown
+        icon.widthAnchor.constraint(equalToConstant: GlassMetrics.rowIconWidth).isActive = true
+        title.widthAnchor.constraint(equalToConstant: 64).isActive = true
+        control.setContentHuggingPriority(.init(1), for: .horizontal)
+
+        let row = NSStackView(views: [icon, title, control])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.orientation = .horizontal
+        row.distribution = .fill
+        row.alignment = .centerY
+        row.spacing = GlassMetrics.rowIconSpacing
+        row.edgeInsets = NSEdgeInsets(
+            top: 0,
+            left: GlassMetrics.rowHorizontalPadding,
+            bottom: 0,
+            right: GlassMetrics.rowHorizontalPadding
+        )
+        row.heightAnchor.constraint(equalToConstant: GlassMetrics.rowHeight).isActive = true
+        return row
+    }
+
+    private func configureSourcePicker() {
+        autoSourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        autoSourceLabel.setContentHuggingPriority(.init(1), for: .horizontal)
+        captureSourceDropdown.setContentHuggingPriority(.init(1), for: .horizontal)
+
+        sourcePicker.orientation = .horizontal
+        sourcePicker.distribution = .fill
+        sourcePicker.alignment = .centerY
+        sourcePicker.spacing = 6
+        sourcePicker.detachesHiddenViews = true
+        for view in [captureSourceDropdown, refreshSourcesButton, autoSourceLabel] as [NSView] {
+            sourcePicker.addArrangedSubview(view)
+        }
+        updateSourceRow(for: .automatic, animated: false)
+    }
+
+    private func updateSourceRow(for mode: CaptureModeChoice, animated: Bool) {
+        let isAuto = mode == .automatic
+        let title: String
+        let symbol: String
+        switch mode {
+        case .automatic:
+            title = "Source"
+            symbol = "sparkle.magnifyingglass"
+        case .display:
+            title = "Display"
+            symbol = "display"
+        case .window:
+            title = "Window"
+            symbol = "macwindow"
+        }
+        GlassMotion.crossfade(sourceTitleLabel, to: title, duration: animated ? 0.25 : 0)
+        if let image = GlassSymbol.image(symbol, size: 13) {
+            if animated, !GlassMotion.reduceMotion {
+                sourceIcon.setSymbolImage(image, contentTransition: .replace.downUp)
+            } else {
+                sourceIcon.image = image
+            }
+        }
+
+        let show: [NSView] = isAuto ? [autoSourceLabel] : [captureSourceDropdown, refreshSourcesButton]
+        let hide: [NSView] = isAuto ? [captureSourceDropdown, refreshSourcesButton] : [autoSourceLabel]
+        hide.forEach { $0.isHidden = true }
+        for view in show {
+            view.isHidden = false
+            if animated, !GlassMotion.reduceMotion {
+                view.alphaValue = 0
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.25
+                    view.animator().alphaValue = 1
                 }
             }
         }
-        
-        settingsButton.target = self
-        settingsButton.action = #selector(handleSettingsTapped)
-
-        let settingsStack = NSStackView(views: [settingsButton])
-        settingsStack.translatesAutoresizingMaskIntoConstraints = false
-        settingsStack.orientation = .horizontal
-        settingsStack.spacing = 0
-        settingsStack.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-
-
-
-
-        let footerStack = NSStackView(views: [divider, settingsStack])
-        footerStack.translatesAutoresizingMaskIntoConstraints = false
-        footerStack.orientation = .vertical
-        footerStack.alignment = .leading
-        footerStack.spacing = 10
-        footerStack.setContentHuggingPriority(.required, for: .vertical)
-
-        container.addSubview(headerStack)
-        container.addSubview(headerDivider)
-        container.addSubview(scrollView)
-        container.addSubview(footerStack)
-
-
-
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 240),
-
-            // Header: pinned to top
-            headerStack.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
-            headerStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            headerStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-
-            // Header Divider
-            headerDivider.topAnchor.constraint(equalTo: headerStack.bottomAnchor, constant: 14),
-            headerDivider.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            headerDivider.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-
-            // ScrollView: fills between header and footer
-            scrollView.topAnchor.constraint(equalTo: headerDivider.bottomAnchor, constant: 8),
-
-            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 6),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
-            scrollView.bottomAnchor.constraint(equalTo: footerStack.topAnchor, constant: -16),
-
-            // Footer: pinned to bottom
-            footerStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-            footerStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            footerStack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16),
-
-            divider.widthAnchor.constraint(equalTo: footerStack.widthAnchor),
-            settingsStack.widthAnchor.constraint(equalTo: footerStack.widthAnchor),
-            settingsButton.heightAnchor.constraint(equalToConstant: 40),
-            settingsButton.widthAnchor.constraint(equalToConstant: 140),
-
-
-
-            // Profile list fills scroll view width
-            profileListStack.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -8)
-        ])
-
-        return container
     }
 
-    private func setupSidebarButton(_ button: SidebarIconButton, symbol: String) -> NSButton {
-        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .bold)
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config)
-        button.imagePosition = .imageOnly
-
-
-
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
-        return button
+    private func makeFrameGenerationGroup() -> NSView {
+        let group = SettingsGroup(title: "Frame Generation", symbol: "sparkles.rectangle.stack")
+        outputTargetLabel.alignment = .right
+        outputTargetLabel.setContentHuggingPriority(.required, for: .horizontal)
+        outputTargetLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        group.addRow(SettingRow.control("Multiplier", symbol: "sparkles", help: "2×, 3× and 4× mean that many presented frames per captured frame.", control: frameGenerationControl))
+        group.addRow(SettingRow.control("Output", symbol: "gauge.with.dots.needle.67percent", help: "The frame rate MetalDuck presents: capture rate × multiplier. It follows the multiplier, so there is no separate limit to guess.", control: outputTargetLabel))
+        group.addRow(SettingRow.control("Stats overlay", symbol: "chart.bar.xaxis", help: "Show capture, generated and output FPS in the corner of the scaled window.", control: hudSwitch))
+        return group
     }
 
-    func setProfiles(_ profiles: [Profile], activeId: UUID) {
-        self.activeProfileId = activeId
-        profileListStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        
-        for profile in profiles {
-            let isActive = (profile.id == activeId)
-            let btn = ProfileButton(profile: profile, isActive: isActive)
-            btn.target = self
-            btn.action = #selector(handleProfileSelected(_:))
-            profileListStack.addArrangedSubview(btn)
-            btn.leadingAnchor.constraint(equalTo: profileListStack.leadingAnchor).isActive = true
-            btn.trailingAnchor.constraint(equalTo: profileListStack.trailingAnchor).isActive = true
+    private func makeScalingGroup() -> NSView {
+        let group = SettingsGroup(title: "Scaling", symbol: "arrow.up.left.and.arrow.down.right")
+        group.addRow(SettingRow.control("Upscaler", symbol: "wand.and.stars", help: "MetalFX Spatial is sharper; Native Linear is cheaper.", control: upscalerDropdown))
+        group.addRow(SettingRow.control("Fit to output", symbol: "display", help: "Scale the source to fill the output window, then apply the factor.", control: matchOutputResolutionSwitch))
+        group.addRow(SettingRow.slider("Scale factor", symbol: "plus.magnifyingglass", slider: outputScaleSlider, value: outputScaleValueLabel))
+        group.addRow(SettingRow.control("Sampling", symbol: "square.grid.3x3", help: "Filter used for native resampling.", control: samplingControl))
+        group.addRow(SettingRow.slider("Sharpness", symbol: "circle.lefthalf.filled", help: "Post-process sharpening strength.", slider: sharpnessSlider, value: sharpnessValueLabel))
+        return group
+    }
+
+    private func makeDynamicResolutionGroup() -> NSView {
+        let group = SettingsGroup(title: "Dynamic Resolution", symbol: "aspectratio")
+        group.addRow(SettingRow.control("Enabled", symbol: "bolt.badge.automatic", help: "Lower the render scale when output falls behind the target.", control: dynamicResolutionSwitch))
+        group.addRow(SettingRow.slider("Minimum", symbol: "arrow.down.right.and.arrow.up.left", slider: dynamicMinSlider, value: dynamicMinValueLabel))
+        group.addRow(SettingRow.slider("Maximum", symbol: "arrow.up.left.and.arrow.down.right", slider: dynamicMaxSlider, value: dynamicMaxValueLabel))
+        return group
+    }
+
+    // MARK: - Motion
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, !didReveal else { return }
+        didReveal = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            GlassMotion.reveal(self.revealViews, delayStep: 0.06)
         }
-        
-        let activeProfile = profiles.first(where: { $0.id == activeId })
-        duplicateProfileButton.isEnabled = true
-        renameProfileButton.isEnabled = activeProfile?.isBuiltIn == false
-        deleteProfileButton.isEnabled = activeProfile?.isBuiltIn == false
     }
 
-    @objc private func handleProfileSelected(_ sender: ProfileButton) {
-        delegate?.controlPanel(self, didSelectProfile: sender.profileId)
+    /// The eye morphs into a slashed eye (and back) via Magic Replace.
+    private func updateHUDButton(animated: Bool = true) {
+        hudButton.setSymbol(isHUDVisible ? "eye" : "eye.slash", animated: animated)
+        hudButton.symbolTint = isHUDVisible ? GlassAccent.color : .secondaryLabelColor
+        hudButton.toolTip = isHUDVisible ? "Hide the stats overlay on the scaled window" : "Show the stats overlay on the scaled window"
+    }
+
+    private func toggleHUD(_ visible: Bool) {
+        setHUDVisible(visible)
+        delegate?.controlPanel(self, didToggleHUD: visible)
+    }
+
+    @objc private func handleHUDButton() {
+        toggleHUD(!isHUDVisible)
+    }
+
+    @objc private func handleHUDSwitch() {
+        toggleHUD(hudSwitch.isOn)
+    }
+
+    // MARK: - State helpers
+
+    /// Play morphs into stop, the label fades and the capsule shifts from
+    /// accent to red; starting also sends out a single ring.
+    private func updatePrimaryButton(animated: Bool = false) {
+        primaryButton.setSymbol(isRunning ? "stop.fill" : "play.fill", animated: animated)
+        primaryButton.title = isRunning ? "Stop" : "Start"
+        primaryButton.style = .accent
+        primaryButton.toolTip = isRunning ? "Stop scaling" : "Start scaling"
+    }
+
+    private func resetMetrics() {
+        captureMetric.set(value: "—")
+        outputMetric.set(value: "—")
+        generatedMetric.set(value: "—")
+        resolutionMetric.set(value: "—")
+    }
+
+    private var selectedFrameGenerationMode: FrameGenerationMode? {
+        let index = frameGenerationControl.selectedSegment - 1
+        let modes = FrameGenerationMode.allCases
+        return modes.indices.contains(index) ? modes[index] : nil
+    }
+
+    /// Output rate is capture × multiplier, shown as the equation so the number
+    /// is explained wherever it comes from (a profile, the capture slider, 2×/3×/4×).
+    private func applyOutputTarget(captureFPS: Int, settings: RenderSettings) {
+        let capture = max(captureFPS, 1)
+        let text: String
+        if settings.frameGenerationEnabled {
+            let multiplier = settings.frameGenerationMode.multiplier
+            resolvedTargetFPS = capture * multiplier
+            text = "\(capture) × \(multiplier) = \(resolvedTargetFPS) fps"
+        } else {
+            resolvedTargetFPS = capture
+            text = "\(capture) fps"
+        }
+        GlassMotion.crossfade(outputTargetLabel, to: text, duration: 0.25)
+        outputTargetLabel.toolTip = settings.frameGenerationEnabled
+            ? "\(capture) captured frames per second, \(settings.frameGenerationMode.multiplier)× generation, \(resolvedTargetFPS) presented."
+            : "Frame generation is off, so output matches the capture rate."
+    }
+
+    private func refreshSummary() {
+        var parts: [String] = []
+        if let upscaler = upscalerDropdown.titleOfSelectedItem {
+            parts.append(upscaler)
+        }
+        parts.append(String(format: "%.2f×", outputScaleSlider.floatValue))
+        if let mode = selectedFrameGenerationMode {
+            parts.append("\(mode.title) frame generation")
+        } else {
+            parts.append("No frame generation")
+        }
+        if resolvedTargetFPS > 0 {
+            parts.append("\(resolvedTargetFPS) fps output")
+        }
+        profileSummaryLabel.stringValue = parts.joined(separator: "  ·  ")
+    }
+
+    private func syncDependentControls() {
+        let dynamicEnabled = dynamicResolutionSwitch.isOn
+        for (slider, label) in [(dynamicMinSlider, dynamicMinValueLabel), (dynamicMaxSlider, dynamicMaxValueLabel)] {
+            slider.isEnabled = dynamicEnabled
+            label.textColor = dynamicEnabled ? .secondaryLabelColor : .tertiaryLabelColor
+        }
+    }
+
+    // MARK: - Profile menu
+
+    private func makeProfileMenu(for profile: Profile) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let duplicate = NSMenuItem(title: "Duplicate", action: #selector(handleDuplicateProfile(_:)), keyEquivalent: "")
+        duplicate.image = GlassSymbol.image("plus.square.on.square")
+        let rename = NSMenuItem(title: "Rename…", action: #selector(handleRenameProfile(_:)), keyEquivalent: "")
+        rename.image = GlassSymbol.image("pencil")
+        rename.isEnabled = !profile.isBuiltIn
+        let delete = NSMenuItem(title: "Delete…", action: #selector(handleDeleteProfile(_:)), keyEquivalent: "")
+        delete.image = GlassSymbol.image("trash")
+        delete.isEnabled = !profile.isBuiltIn
+
+        for item in [duplicate, rename, delete] {
+            item.target = self
+            item.representedObject = profile.id
+        }
+        menu.addItem(duplicate)
+        menu.addItem(.separator())
+        menu.addItem(rename)
+        menu.addItem(delete)
+        return menu
+    }
+
+    @objc private func handleDuplicateProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        delegate?.controlPanel(self, didRequestDuplicateProfile: id)
+    }
+
+    @objc private func handleRenameProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        delegate?.controlPanel(self, didRequestRenameProfile: id)
+    }
+
+    @objc private func handleDeleteProfile(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID else { return }
+        delegate?.controlPanel(self, didRequestDeleteProfile: id)
+    }
+
+    // MARK: - Actions
+
+    @objc private func handlePrimaryTapped() {
+        if isRunning {
+            delegate?.controlPanelDidPressStop(self)
+        } else {
+            delegate?.controlPanelDidPressStart(self)
+        }
+    }
+
+    @objc private func handleRefreshSources() {
+        if !GlassMotion.reduceMotion {
+            refreshSourcesButton.imageView.addSymbolEffect(.rotate, options: .nonRepeating)
+        }
+        delegate?.controlPanelDidRequestRefreshSources(self)
     }
 
     @objc private func handleAddProfile() {
         delegate?.controlPanelDidRequestAddProfile(self)
     }
 
-    @objc private func handleDuplicateProfile() {
-        guard let id = activeProfileId else { return }
-        delegate?.controlPanel(self, didRequestDuplicateProfile: id)
+    @objc private func handleCaptureModeChanged() {
+        guard !isApplyingValues,
+              let mode = CaptureModeChoice(rawValue: captureModeControl.selectedSegment) else { return }
+        updateSourceRow(for: mode, animated: true)
+        delegate?.controlPanel(self, didSelectCaptureMode: mode)
     }
 
-    @objc private func handleRenameProfile() {
-        guard let id = activeProfileId else { return }
-        delegate?.controlPanel(self, didRequestRenameProfile: id)
+    @objc private func handleSamplingChanged() {
+        guard !isApplyingValues else { return }
+        let modes = SamplingMode.allCases
+        let index = samplingControl.selectedSegment
+        guard modes.indices.contains(index) else { return }
+        delegate?.controlPanel(self, didChangeSamplingMode: modes[index])
     }
 
-    @objc private func handleDeleteProfile() {
-        guard let id = activeProfileId else { return }
-        delegate?.controlPanel(self, didRequestDeleteProfile: id)
-    }
-
-    @objc private func handleSettingsTapped() {
-        delegate?.controlPanelDidRequestSettings(self)
-    }
-
-
-    private func makeMainContent() -> NSView {
-        let scrollView = NSScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.drawsBackground = false
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = false
-        scrollView.autohidesScrollers = true
-
-        let contentView = FlippedPanelContainerView()
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = contentView
-
-        let clipView = scrollView.contentView
-
-        let stack = NSStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.distribution = .fill
-        stack.spacing = 14
-
-        stack.addArrangedSubview(profileTitleLabel)
-
-        let sessionCard = makeSessionCard()
-        stack.addArrangedSubview(sessionCard)
-
-        let captureCard = makeCaptureCard()
-        let scalingCard = makeScalingCard()
-        let row1 = makeCardRow(left: captureCard, right: scalingCard)
-        stack.addArrangedSubview(row1)
-
-        let frameGenerationCard = makeFrameGenerationCard()
-        let renderingCard = makeRenderingCard()
-        let row2 = makeCardRow(left: frameGenerationCard, right: renderingCard)
-        stack.addArrangedSubview(row2)
-
-        contentView.addSubview(stack)
-
-        // Pin stack to fill scroll content with explicit leading + trailing
-        NSLayoutConstraint.activate([
-            contentView.leadingAnchor.constraint(equalTo: clipView.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: clipView.trailingAnchor),
-            contentView.topAnchor.constraint(equalTo: clipView.topAnchor),
-            contentView.bottomAnchor.constraint(greaterThanOrEqualTo: clipView.bottomAnchor),
-            contentView.widthAnchor.constraint(equalTo: clipView.widthAnchor),
-
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -6),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
-
-            // Pin each child to fill the stack width
-            sessionCard.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            sessionCard.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            row1.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            row1.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
-            row2.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
-            row2.trailingAnchor.constraint(equalTo: stack.trailingAnchor)
-        ])
-
-        return scrollView
-    }
-
-    private func makeSessionCard() -> NSView {
-        let card = CardView(title: "Session")
-
-        statusLabel.setContentHuggingPriority(.required, for: .vertical)
-        statusLabel.alignment = .left
-        statsLabel.alignment = .left
-
-        // Fixed container: dot pinned to leading, label follows
-        let statusContainer = NSView()
-        statusContainer.translatesAutoresizingMaskIntoConstraints = false
-        statusContainer.addSubview(statusDot)
-        statusContainer.addSubview(statusLabel)
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            statusDot.leadingAnchor.constraint(equalTo: statusContainer.leadingAnchor),
-            statusDot.centerYAnchor.constraint(equalTo: statusContainer.centerYAnchor),
-            statusLabel.leadingAnchor.constraint(equalTo: statusDot.trailingAnchor, constant: 8),
-            statusLabel.topAnchor.constraint(equalTo: statusContainer.topAnchor),
-            statusLabel.bottomAnchor.constraint(equalTo: statusContainer.bottomAnchor),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: statusContainer.trailingAnchor),
-            statusContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 28)
-        ])
-
-        card.contentStack.addArrangedSubview(statusContainer)
-        card.contentStack.addArrangedSubview(statsLabel)
-
-        // Stretch items to fill card width
-        statusContainer.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
-        statusContainer.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
-        statsLabel.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
-        statsLabel.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
-
-        card.setContentHuggingPriority(.required, for: .vertical)
-        card.heightAnchor.constraint(equalToConstant: 120).isActive = true
-
-        return card
-    }
-
-    private func makeFrameGenerationCard() -> NSView {
-        let card = CardView(title: "Frame Generation", iconName: "film")
-
-        let enabledRow = makeLabeledControlRow(label: "Enabled", control: frameGenerationSwitch, info: "Generates intermediate frames to raise output FPS; best at 30→60/90.")
-        let modeRow = makeLabeledControlRow(label: "Mode", control: frameGenerationModeDropdown, info: "Sets the frame generation multiplier.")
-
-        card.contentStack.addArrangedSubview(enabledRow)
-        card.contentStack.addArrangedSubview(modeRow)
-
-        // Pin rows to fill card width
-        for row in [enabledRow, modeRow] {
-            row.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
-            row.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
+    @objc private func handleFrameGenerationChanged() {
+        guard !isApplyingValues else { return }
+        refreshSummary()
+        if let mode = selectedFrameGenerationMode {
+            delegate?.controlPanel(self, didChangeFrameGenerationMode: mode)
+            delegate?.controlPanel(self, didToggleFrameGeneration: true)
+        } else {
+            delegate?.controlPanel(self, didToggleFrameGeneration: false)
         }
-
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
-
-        return card
     }
 
-    private func makeScalingCard() -> NSView {
-        let card = CardView(title: "Scaling", iconName: "plus.viewfinder")
-
-        let typeRow = makeLabeledControlRow(label: "Type", control: upscalerDropdown, info: "Choose the upscaler implementation.")
-        let factorRow = makeSliderRow(label: "Factor", slider: outputScaleSlider, valueLabel: outputScaleValueLabel)
-        let matchRow = makeLabeledControlRow(label: "Match Resolution", control: matchOutputResolutionSwitch, info: "Resize source before scaling to match output.")
-        let samplingRow = makeLabeledControlRow(label: "Sampling", control: samplingDropdown, info: "Resampling filter used during scaling.")
-        let sharpRow = makeSliderRow(label: "Sharpness", slider: sharpnessSlider, valueLabel: sharpnessValueLabel, info: "Post-sharpening intensity.")
-
-        let rows: [NSView] = [typeRow, factorRow, matchRow, samplingRow, sharpRow]
-        for row in rows {
-            card.contentStack.addArrangedSubview(row)
-            row.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
-            row.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
-        }
-
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-
-        return card
+    @objc private func handleCursorCaptureChanged() {
+        guard !isApplyingValues else { return }
+        delegate?.controlPanel(self, didToggleCursor: captureCursorSwitch.isOn)
     }
 
-    private func makeCaptureCard() -> NSView {
-        let card = CardView(title: "Capture", iconName: "display")
-
-        let modeRow = makeLabeledControlRow(label: "Mode", control: captureModeDropdown, info: "Select automatic, display, or window source.")
-        let sourceRow = makeSourcePickerRow()
-        let cursorRow = makeLabeledControlRow(label: "Show Cursor", control: captureCursorSwitch)
-        let fpsRow = makeSliderRow(label: "Capture FPS", slider: captureFPSSlider, valueLabel: captureFPSValueLabel, info: "Capture cadence from the source.")
-        let depthRow = makeSliderRow(label: "Queue Depth", slider: queueDepthSlider, valueLabel: queueDepthValueLabel, info: "Buffered frames to balance latency and stability.")
-
-        let rows: [NSView] = [modeRow, sourceRow, cursorRow, fpsRow, depthRow]
-        for row in rows {
-            card.contentStack.addArrangedSubview(row)
-            row.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
-            row.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
-        }
-
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-
-        return card
-    }
-
-    private func makeRenderingCard() -> NSView {
-        let card = CardView(title: "Rendering", iconName: "gearshape", headerAccessory: advancedToggleButton)
-
-        advancedContentStack.translatesAutoresizingMaskIntoConstraints = false
-        advancedContentStack.orientation = .vertical
-        advancedContentStack.alignment = .leading
-        advancedContentStack.spacing = 10
-        advancedContentStack.isHidden = !isAdvancedVisible
-
-        // Rendering Controls
-        let dynRow = makeLabeledControlRow(label: "Dynamic Resolution", control: dynamicResolutionSwitch)
-        let minRow = makeSliderRow(label: "Min Scale", slider: dynamicMinSlider, valueLabel: dynamicMinValueLabel)
-        let maxRow = makeSliderRow(label: "Max Scale", slider: dynamicMaxSlider, valueLabel: dynamicMaxValueLabel)
-        let fpsRow = makeSliderRow(label: "Target FPS", slider: targetFPSSlider, valueLabel: targetFPSValueLabel)
-
-        advancedContentStack.addArrangedSubview(dynRow)
-        advancedContentStack.addArrangedSubview(minRow)
-        advancedContentStack.addArrangedSubview(maxRow)
-        advancedContentStack.addArrangedSubview(fpsRow)
-        
-        card.contentStack.addArrangedSubview(advancedContentStack)
-
-        // Pin advanced content to fill card width via leading+trailing
-        advancedContentStack.leadingAnchor.constraint(equalTo: card.contentStack.leadingAnchor).isActive = true
-        advancedContentStack.trailingAnchor.constraint(equalTo: card.contentStack.trailingAnchor).isActive = true
-        // Pin each row inside advanced to fill
-        for row in [dynRow, minRow, maxRow, fpsRow] {
-            row.leadingAnchor.constraint(equalTo: advancedContentStack.leadingAnchor).isActive = true
-            row.trailingAnchor.constraint(equalTo: advancedContentStack.trailingAnchor).isActive = true
-        }
-        
-        
-        // Match Frame Generation card minimum height so they align on first launch
-        card.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
-        card.setContentHuggingPriority(.defaultHigh, for: .vertical)
-
-        return card
-    }
-    
-    private func makeCardRow(left: NSView, right: NSView) -> NSView {
-        left.translatesAutoresizingMaskIntoConstraints = false
-        right.translatesAutoresizingMaskIntoConstraints = false
-
-        let row = NSStackView(views: [left, right])
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.orientation = .horizontal
-        row.distribution = .fillEqually
-        row.alignment = .top
-        row.spacing = 16
-
-        // Keep both cards same height so one doesn't vanish when the other expands
-        left.heightAnchor.constraint(equalTo: right.heightAnchor).isActive = true
-
-        return row
-    }
-
-    private func makeLabeledControlRow(label: String, control: NSView, info: String? = nil) -> NSView {
-        let text = NSTextField(labelWithString: label)
-        text.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        text.textColor = UITheme.body
-        text.setContentHuggingPriority(.required, for: .horizontal)
-
-        let titleStack = NSStackView(views: [text])
-        titleStack.orientation = .horizontal
-        titleStack.alignment = .centerY
-        titleStack.spacing = 6
-        if let info {
-            titleStack.addArrangedSubview(makeInfoIcon(title: label, tooltip: info))
-        }
-
-        let row = NSStackView(views: [titleStack, control])
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.distribution = .fill
-        row.spacing = 8
-        return row
-    }
-
-    private func makeSliderRow(label: String, slider: NSSlider, valueLabel: NSTextField, info: String? = nil) -> NSView {
-        let title = NSTextField(labelWithString: label)
-        title.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        title.textColor = UITheme.body
-
-        valueLabel.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .semibold)
-        valueLabel.textColor = UITheme.title
-        valueLabel.alignment = .right
-        valueLabel.setContentHuggingPriority(.required, for: .horizontal)
-
-        let titleStack = NSStackView(views: [title])
-        titleStack.orientation = .horizontal
-        titleStack.alignment = .centerY
-        titleStack.spacing = 6
-        if let info {
-            titleStack.addArrangedSubview(makeInfoIcon(title: label, tooltip: info))
-        }
-
-        let rowHeader = NSStackView(views: [titleStack, valueLabel])
-        rowHeader.translatesAutoresizingMaskIntoConstraints = false
-        rowHeader.orientation = .horizontal
-        rowHeader.alignment = .centerY
-        rowHeader.distribution = .fill
-        rowHeader.spacing = 8
-
-        slider.translatesAutoresizingMaskIntoConstraints = false
-
-        let row = NSStackView(views: [rowHeader, slider])
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.orientation = .vertical
-        row.spacing = 3
-        row.alignment = .leading
-
-        // Pin header and slider to fill row width via leading+trailing
-        rowHeader.leadingAnchor.constraint(equalTo: row.leadingAnchor).isActive = true
-        rowHeader.trailingAnchor.constraint(equalTo: row.trailingAnchor).isActive = true
-        slider.leadingAnchor.constraint(equalTo: row.leadingAnchor).isActive = true
-        slider.trailingAnchor.constraint(equalTo: row.trailingAnchor).isActive = true
-
-        return row
-    }
-
-    private func makeSourcePickerRow() -> NSView {
-        let row = NSStackView(views: [captureSourceDropdown, refreshSourcesButton])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        refreshSourcesButton.setContentHuggingPriority(.required, for: .horizontal)
-        return row
-    }
-
-    private func makeInfoIcon(title: String, tooltip: String) -> NSView {
-        let icon = HoverInfoIcon(tooltip: tooltip)
-        return icon
-    }
-
-    private func makeSecondaryButton(title: String) -> NSButton {
-        let button = NSButton(title: title, target: nil, action: nil)
-        button.bezelStyle = .rounded
-        button.bezelColor = NSColor(calibratedRed: 0.24, green: 0.25, blue: 0.30, alpha: 1.0)
-        button.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        return button
-    }
-
-    private func makeSecondaryIconButton(symbolName: String) -> NSButton {
-        let button = NSButton()
-        button.bezelStyle = .rounded
-        button.bezelColor = NSColor(calibratedRed: 0.24, green: 0.25, blue: 0.30, alpha: 1.0)
-        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: symbolName)
-        button.imagePosition = .imageOnly
-        button.contentTintColor = UITheme.body
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        return button
-    }
-
-    private func syncDynamicControlsEnabledState() {
-        let enabled = dynamicResolutionSwitch.state == .on
-        dynamicMinSlider.isEnabled = enabled
-        dynamicMaxSlider.isEnabled = enabled
-    }
-
-    @objc
-    private func handleStartTapped() {
-        delegate?.controlPanelDidPressStart(self)
-    }
-
-    @objc
-    private func handleStopTapped() {
-        delegate?.controlPanelDidPressStop(self)
-    }
-
-    @objc
-    private func handleRefreshSources() {
-        delegate?.controlPanelDidRequestRefreshSources(self)
-    }
-
-
-    @objc
-    private func handleCursorCaptureChanged() {
-        guard !isApplyingValues else {
-            return
-        }
-        delegate?.controlPanel(self, didToggleCursor: captureCursorSwitch.state == .on)
-    }
-
-    @objc
-    private func handleCaptureFPSChanged() {
-        guard !isApplyingValues else {
-            return
-        }
+    @objc private func handleCaptureFPSChanged() {
+        guard !isApplyingValues else { return }
         let value = captureFPSSlider.integerValue
-        captureFPSValueLabel.stringValue = "\(value)"
+        captureFPSValueLabel.stringValue = "\(value) fps"
         delegate?.controlPanel(self, didChangeCaptureFPS: value)
     }
 
-    @objc
-    private func handleQueueDepthChanged() {
-        guard !isApplyingValues else {
-            return
-        }
+    @objc private func handleQueueDepthChanged() {
+        guard !isApplyingValues else { return }
         let value = queueDepthSlider.integerValue
         queueDepthValueLabel.stringValue = "\(value)"
         delegate?.controlPanel(self, didChangeQueueDepth: value)
     }
 
-
-    @objc
-    private func handleOutputScaleChanged() {
-        guard !isApplyingValues else {
-            return
-        }
+    @objc private func handleOutputScaleChanged() {
+        guard !isApplyingValues else { return }
         let value = outputScaleSlider.floatValue
-        outputScaleValueLabel.stringValue = String(format: "%.2fx", value)
+        outputScaleValueLabel.stringValue = String(format: "%.2f×", value)
+        refreshSummary()
         delegate?.controlPanel(self, didChangeOutputScale: value)
     }
 
-    @objc
-    private func handleMatchOutputResolutionChanged() {
-        guard !isApplyingValues else {
-            return
-        }
-        delegate?.controlPanel(self, didToggleMatchOutputResolution: matchOutputResolutionSwitch.state == .on)
+    @objc private func handleMatchOutputResolutionChanged() {
+        guard !isApplyingValues else { return }
+        delegate?.controlPanel(self, didToggleMatchOutputResolution: matchOutputResolutionSwitch.isOn)
     }
 
-    @objc
-    private func handleSharpnessChanged() {
-        guard !isApplyingValues else {
-            return
-        }
+    @objc private func handleSharpnessChanged() {
+        guard !isApplyingValues else { return }
         let value = sharpnessSlider.floatValue
         sharpnessValueLabel.stringValue = String(format: "%.2f", value)
         delegate?.controlPanel(self, didChangeSharpness: value)
     }
 
-    @objc
-    private func handleDynamicResolutionChanged() {
-        guard !isApplyingValues else {
-            return
-        }
-        syncDynamicControlsEnabledState()
-        delegate?.controlPanel(self, didToggleDynamicResolution: dynamicResolutionSwitch.state == .on)
+    @objc private func handleDynamicResolutionChanged() {
+        guard !isApplyingValues else { return }
+        syncDependentControls()
+        delegate?.controlPanel(self, didToggleDynamicResolution: dynamicResolutionSwitch.isOn)
     }
 
-    @objc
-    private func handleDynamicMinChanged() {
-        guard !isApplyingValues else {
-            return
-        }
+    @objc private func handleDynamicMinChanged() {
+        guard !isApplyingValues else { return }
         let value = min(dynamicMinSlider.floatValue, dynamicMaxSlider.floatValue)
         dynamicMinSlider.floatValue = value
         dynamicMinValueLabel.stringValue = String(format: "%.2f", value)
         delegate?.controlPanel(self, didChangeDynamicMinimum: value)
     }
 
-    @objc
-    private func handleDynamicMaxChanged() {
-        guard !isApplyingValues else {
-            return
-        }
+    @objc private func handleDynamicMaxChanged() {
+        guard !isApplyingValues else { return }
         let value = max(dynamicMaxSlider.floatValue, dynamicMinSlider.floatValue)
         dynamicMaxSlider.floatValue = value
         dynamicMaxValueLabel.stringValue = String(format: "%.2f", value)
         delegate?.controlPanel(self, didChangeDynamicMaximum: value)
     }
 
-    @objc
-    private func handleTargetFPSChanged() {
-        guard !isApplyingValues else {
-            return
-        }
-        let value = targetFPSSlider.integerValue
-        targetFPSValueLabel.stringValue = "\(value)"
-        delegate?.controlPanel(self, didChangeTargetPresentationFPS: value)
-    }
-
-    @objc
-    private func handleFrameGenerationEnabledChanged() {
-        guard !isApplyingValues else {
-            return
-        }
-        delegate?.controlPanel(self, didToggleFrameGeneration: frameGenerationSwitch.state == .on)
-    }
-
-    @objc
-    private func handleAdvancedToggle() {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
-            context.allowsImplicitAnimation = true
-            
-            isAdvancedVisible.toggle()
-            advancedContentStack.isHidden = !isAdvancedVisible
-            
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
-            let symbolName = isAdvancedVisible ? "chevron.down" : "chevron.right"
-            advancedToggleButton.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: isAdvancedVisible ? "Hide" : "Show")?.withSymbolConfiguration(config)
-            advancedToggleButton.contentTintColor = isAdvancedVisible ? UITheme.accent : UITheme.muted
-            
-            self.window?.layoutIfNeeded()
-            self.layoutSubtreeIfNeeded()
-        }
-    }
 }
 
-private final class HoverInfoIcon: NSView {
-    private let tooltipText: String
-    private var popover: NSPopover?
-    private var hoverTimer: Timer?
-    private var trackingArea: NSTrackingArea?
+/// Glass mark in the gap above the rail, left of the profile name.
+/// The name appears beside it only while the rail is open.
+final class SidebarMark: NSView {
+    private let title = GlassLabel.make("MetalDuck", font: GlassFont.sidebarItem, color: .secondaryLabelColor)
 
-    init(tooltip: String) {
-        self.tooltipText = tooltip
-        super.init(frame: NSRect(x: 0, y: 0, width: 16, height: 16))
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: 16).isActive = true
-        heightAnchor.constraint(equalToConstant: 16).isActive = true
-        setContentHuggingPriority(.required, for: .horizontal)
+        wantsLayer = true
+        layer?.masksToBounds = true
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.image = MetalDuckIcon.glassMark()
+        icon.setAccessibilityLabel("MetalDuck")
+
+        title.alphaValue = 0
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        addSubview(icon)
+        addSubview(title)
+        // Same axis as the 20 pt row icons: their centre is 30 pt from the rail edge.
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 36),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 32),
+            icon.heightAnchor.constraint(equalToConstant: 32),
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
     }
 
     @available(*, unavailable)
@@ -1554,88 +1152,81 @@ private final class HoverInfoIcon: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
-            .foregroundColor: UITheme.muted
-        ]
-        let str = NSAttributedString(string: "ⓘ", attributes: attributes)
-        let size = str.size()
-        let point = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
-        str.draw(at: point)
-    }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let existing = trackingArea {
-            removeTrackingArea(existing)
-        }
-        let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        trackingArea = area
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        hoverTimer?.invalidate()
-        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                self?.showTooltip()
-            }
+    func setExpanded(_ expanded: Bool, animated: Bool) {
+        let alpha: CGFloat = expanded ? 1 : 0
+        if animated {
+            title.animator().alphaValue = alpha
+        } else {
+            title.alphaValue = alpha
         }
     }
+}
 
-    override func mouseExited(with event: NSEvent) {
-        hoverTimer?.invalidate()
-        hoverTimer = nil
-        hideTooltip()
-    }
+/// Sidebar section title. When the sidebar shows icons only, the title fades
+/// and the accessory (the + button) moves into the icon column.
+final class SidebarHeaderView: NSView {
+    private let label: NSTextField
+    private var heightConstraint: NSLayoutConstraint!
+    private var accessoryTrailing: NSLayoutConstraint?
 
-    private func showTooltip() {
-        guard popover == nil else { return }
+    /// Centres a 22 pt accessory over the 20 pt icons of 40 pt collapsed rows.
+    private static let compactTrailing: CGFloat = -9
+    private static let regularTrailing: CGFloat = -2
 
-        let pop = NSPopover()
-        pop.behavior = .semitransient
-        pop.animates = true
-
-        let vc = NSViewController()
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(calibratedRed: 0.14, green: 0.15, blue: 0.18, alpha: 1.0).cgColor
-        container.layer?.cornerRadius = 7
-
-        let label = NSTextField(labelWithString: tooltipText)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = NSFont.systemFont(ofSize: 12, weight: .regular)
-        label.textColor = NSColor(white: 0.92, alpha: 1.0)
-        label.cell?.wraps = true
-        label.preferredMaxLayoutWidth = 250
-        label.lineBreakMode = .byWordWrapping
-
-        container.addSubview(label)
-
+    init(title: String, accessory: NSView?) {
+        label = GlassLabel.sidebarHeader(title)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        addSubview(label)
+        let height = heightAnchor.constraint(equalToConstant: 28)
+        heightConstraint = height
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 8),
-            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -8)
+            height,
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
 
-        vc.view = container
-        pop.contentViewController = vc
-        pop.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
-        popover = pop
+        let labelEnd: NSLayoutConstraint
+        if let accessory {
+            accessory.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(accessory)
+            let trailing = accessory.trailingAnchor.constraint(equalTo: trailingAnchor, constant: Self.regularTrailing)
+            accessoryTrailing = trailing
+            NSLayoutConstraint.activate([trailing, accessory.centerYAnchor.constraint(equalTo: centerYAnchor)])
+            labelEnd = label.trailingAnchor.constraint(lessThanOrEqualTo: accessory.leadingAnchor, constant: -6)
+        } else {
+            labelEnd = label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2)
+        }
+        // Gives way at the collapsed width, where the faded title has no room.
+        labelEnd.priority = .defaultHigh
+        labelEnd.isActive = true
     }
 
-    private func hideTooltip() {
-        popover?.performClose(nil)
-        popover = nil
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Call inside an animation group to move with the sidebar.
+    func setCompact(_ compact: Bool, animated: Bool) {
+        let alpha: CGFloat = compact ? 0 : 1
+        let trailing = compact ? Self.compactTrailing : Self.regularTrailing
+        // A title with nothing else under it is just a blank band once the words fade.
+        // The new-profile header keeps a row so its + stays with the icons.
+        let height: CGFloat = accessoryTrailing == nil ? (compact ? 0 : 28) : (compact ? 40 : 28)
+        if animated {
+            label.animator().alphaValue = alpha
+            accessoryTrailing?.animator().constant = trailing
+            heightConstraint.animator().constant = height
+        } else {
+            label.alphaValue = alpha
+            accessoryTrailing?.constant = trailing
+            heightConstraint.constant = height
+        }
     }
 }

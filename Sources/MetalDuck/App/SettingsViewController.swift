@@ -1,77 +1,28 @@
 import AppKit
 
 final class SettingsViewController: NSViewController {
-    private let settingsStore: SettingsStore
-    
-    private let titleLabel = NSTextField(labelWithString: "Settings")
-    private let shortcutToggle = NSSwitch()
-    private let shortcutLabel = NSTextField(labelWithString: "Enable global shortcut")
-    private let recorderField = ShortcutRecorderField()
-    private let descriptionLabel = NSTextField(labelWithString: "The shortcut toggles Scale on/off.")
-    
-    private var clickMonitor: Any?
+    var onShortcutChanged: (() -> Void)?
 
-    
+    private let settingsStore: SettingsStore
+
+    private let shortcutToggle = NSSwitch()
+    private let recorderField = ShortcutRecorderField()
+
     init(settingsStore: SettingsStore) {
         self.settingsStore = settingsStore
         super.init(nibName: nil, bundle: nil)
     }
-    
-    required init?(coder: NSCoder) { fatalError() }
-    
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     override func loadView() {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 240))
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor(calibratedRed: 0.12, green: 0.13, blue: 0.16, alpha: 1.0).cgColor
-        self.view = view
-        
-        self.preferredContentSize = NSSize(width: 320, height: 240)
-        
-        setupUI()
-        layoutUI()
-        applySettings()
-    }
-
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        setupClickOutsideMonitor()
-    }
-
-    override func viewWillDisappear() {
-        super.viewWillDisappear()
-        if let monitor = clickMonitor {
-            NSEvent.removeMonitor(monitor)
-            clickMonitor = nil
-        }
-    }
-
-    private func setupClickOutsideMonitor() {
-        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            guard let self = self, let window = self.view.window else { return event }
-            
-            let locationInWindow = event.locationInWindow
-            let locationInView = self.view.convert(locationInWindow, from: nil)
-            
-            if !self.view.bounds.contains(locationInView) {
-                // Click is outside the view (and thus the sheet content area)
-                self.dismiss(nil)
-                return nil // Consume event
-            }
-            return event
-        }
-    }
-
-    
-    private func setupUI() {
-        titleLabel.font = .systemFont(ofSize: 18, weight: .bold)
-        titleLabel.textColor = .white
-        
-        shortcutLabel.font = .systemFont(ofSize: 14)
-        shortcutLabel.textColor = .white
-        
+        shortcutToggle.controlSize = .small
         shortcutToggle.target = self
         shortcutToggle.action = #selector(handleToggleChanged)
-        
+
         recorderField.target = self
         recorderField.action = #selector(handleRecorderTapped)
         recorderField.onShortcutChanged = { [weak self] newShortcut in
@@ -81,67 +32,73 @@ final class SettingsViewController: NSViewController {
             current.modifiers = newShortcut.modifiers
             self.settingsStore.shortcut = current
             ShortcutManager.shared.update(settings: current)
+            self.onShortcutChanged?()
         }
-        
-        descriptionLabel.font = .systemFont(ofSize: 11)
-        descriptionLabel.textColor = .secondaryLabelColor
+
+        let hint = GlassLabel.make(
+            "Click the field, then press a key with ⌘, ⌥, ⌃ or ⇧, or a function key. Delete clears it. \(ShortcutManager.panicDisplay) always stops scaling.",
+            font: GlassFont.caption,
+            color: .tertiaryLabelColor
+        )
+        hint.lineBreakMode = .byWordWrapping
+        hint.maximumNumberOfLines = 3
+        hint.preferredMaxLayoutWidth = 352
+
+        recorderField.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        let group = SettingsGroup(title: "Keyboard", symbol: "keyboard")
+        group.addRow(SettingRow.control("Global shortcut", symbol: "command", help: "Starts or stops scaling from any app.", control: shortcutToggle))
+        group.addRow(SettingRow.control("Shortcut", symbol: "record.circle", control: recorderField))
+
+        let body = NSStackView(views: [group, hint])
+        body.translatesAutoresizingMaskIntoConstraints = false
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 10
+        for row in body.arrangedSubviews {
+            row.leadingAnchor.constraint(equalTo: body.leadingAnchor).isActive = true
+            row.trailingAnchor.constraint(equalTo: body.trailingAnchor).isActive = true
+        }
+
+        view = GlassSheet.makeView(
+            width: 400,
+            symbol: "gearshape",
+            title: "Settings",
+            message: "Control MetalDuck without switching apps.",
+            body: body,
+            buttons: [GlassButton.push("Done", target: self, action: #selector(handleDone), isDefault: true)]
+        )
+        applySettings()
     }
-    
-    private func layoutUI() {
-        let titleStack = NSStackView(views: [titleLabel])
-        titleStack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 10, right: 20)
-        
-        let toggleStack = NSStackView(views: [shortcutLabel, NSView(), shortcutToggle])
-        toggleStack.orientation = .horizontal
-        toggleStack.distribution = .fill
-        
-        let recorderStack = NSStackView(views: [recorderField])
-        recorderStack.alignment = .leading
-        
-        let mainStack = NSStackView(views: [titleLabel, toggleStack, recorderField, descriptionLabel])
-        mainStack.translatesAutoresizingMaskIntoConstraints = false
-        mainStack.orientation = .vertical
-        mainStack.alignment = .leading
-        mainStack.spacing = 16
-        mainStack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
-        
-        view.addSubview(mainStack)
-        
-        NSLayoutConstraint.activate([
-            mainStack.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            mainStack.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            mainStack.topAnchor.constraint(equalTo: view.topAnchor),
-            mainStack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor),
-            
-            toggleStack.widthAnchor.constraint(equalTo: mainStack.widthAnchor, constant: -48),
-            recorderField.widthAnchor.constraint(equalTo: mainStack.widthAnchor, constant: -48),
-            recorderField.heightAnchor.constraint(equalToConstant: 32)
-        ])
-    }
-    
+
     private func applySettings() {
         let shortcut = settingsStore.shortcut
         shortcutToggle.state = shortcut.enabled ? .on : .off
         recorderField.shortcut = shortcut
         recorderField.isEnabled = shortcut.enabled
     }
-    
+
     @objc private func handleToggleChanged() {
         var current = settingsStore.shortcut
         current.enabled = shortcutToggle.state == .on
         settingsStore.shortcut = current
         recorderField.isEnabled = current.enabled
         ShortcutManager.shared.update(settings: current)
+        onShortcutChanged?()
     }
-    
+
     @objc private func handleRecorderTapped() {
         recorderField.isRecording = true
+    }
+
+    @objc private func handleDone() {
+        recorderField.isRecording = false
+        dismiss(nil)
     }
 }
 
 final class ShortcutRecorderField: NSButton {
     var onShortcutChanged: ((ShortcutSettings) -> Void)?
-    
+
     var isRecording = false {
         didSet {
             updateAppearance()
@@ -150,78 +107,83 @@ final class ShortcutRecorderField: NSButton {
             }
         }
     }
-    
+
     var shortcut: ShortcutSettings? {
-        didSet {
-            updateAppearance()
-        }
+        didSet { updateAppearance() }
     }
-    
+
+    override var isEnabled: Bool {
+        didSet { updateAppearance() }
+    }
+
     init() {
         super.init(frame: .zero)
-        bezelStyle = .rounded
+        translatesAutoresizingMaskIntoConstraints = false
+        bezelStyle = .push
+        controlSize = .large
         setButtonType(.momentaryPushIn)
-        wantsLayer = true
+        font = GlassFont.value
+        heightAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
         updateAppearance()
     }
-    
-    required init?(coder: NSCoder) { fatalError() }
-    
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     private func updateAppearance() {
         if isRecording {
-            title = "Recording... Press keys"
-            layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.3).cgColor
-        } else if let shortcut = shortcut, shortcut.keyCode != nil {
+            title = "Press a shortcut…"
+            bezelColor = .controlAccentColor
+            contentTintColor = .white
+        } else if let shortcut, shortcut.keyCode != nil {
             title = shortcut.displayString
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.1).cgColor
+            bezelColor = nil
+            contentTintColor = nil
         } else {
-            title = "Click to record shortcut"
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.05).cgColor
-        }
-        
-        if !isEnabled {
-            alphaValue = 0.5
-        } else {
-            alphaValue = 1.0
+            title = "Record Shortcut"
+            bezelColor = nil
+            contentTintColor = .secondaryLabelColor
         }
     }
-    
+
     override func resignFirstResponder() -> Bool {
         isRecording = false
         return true
     }
-    
+
     override func keyDown(with event: NSEvent) {
-        if isRecording {
-            if event.keyCode == 51 || event.keyCode == 117 { // Delete or Backspace to clear
-                let newShortcut = ShortcutSettings(enabled: true, keyCode: nil, modifiers: 0)
-                self.shortcut = newShortcut
-                onShortcutChanged?(newShortcut)
-                isRecording = false
-                return
-            }
-            
-            if event.keyCode == 53 { // Escape
-                isRecording = false
-                return
-            }
-            
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if !modifiers.isEmpty || isFunctionKey(event.keyCode) {
-                let newShortcut = ShortcutSettings(enabled: true, keyCode: Int(event.keyCode), modifiers: modifiers.rawValue)
-                self.shortcut = newShortcut
-                onShortcutChanged?(newShortcut)
-                isRecording = false
-            }
-        } else {
+        guard isRecording else {
             super.keyDown(with: event)
+            return
+        }
+
+        if event.keyCode == 51 || event.keyCode == 117 {
+            let cleared = ShortcutSettings(enabled: true, keyCode: nil, modifiers: 0)
+            shortcut = cleared
+            onShortcutChanged?(cleared)
+            isRecording = false
+            return
+        }
+
+        if event.keyCode == 53 {
+            isRecording = false
+            return
+        }
+
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if !modifiers.isEmpty || isFunctionKey(event.keyCode) {
+            let recorded = ShortcutSettings(enabled: true, keyCode: Int(event.keyCode), modifiers: modifiers.rawValue)
+            shortcut = recorded
+            onShortcutChanged?(recorded)
+            isRecording = false
         }
     }
-    
+
     private func isFunctionKey(_ keyCode: UInt16) -> Bool {
-        // F1-F12 keys are roughly 122-111 and others
-        return (122...131).contains(keyCode) || (96...101).contains(keyCode) || (103...111).contains(keyCode)
+        (122...131).contains(keyCode) || (96...101).contains(keyCode) || (103...111).contains(keyCode)
     }
-    
+
     override var acceptsFirstResponder: Bool { true }
 }

@@ -6,12 +6,13 @@ final class OutputViewController: NSViewController {
     let mtkView: MTKView
 
     private let telemetryContainer = NSVisualEffectView()
-    private let sourceFPSLabel = NSTextField(labelWithString: "SOURCE FPS: 0.0")
-    private let generatedFPSLabel = NSTextField(labelWithString: "GEN FPS: 0.0")
-    private let captureFPSLabel = NSTextField(labelWithString: "CAP FPS: 0.0")
-    private let outputFPSLabel = NSTextField(labelWithString: "OUT FPS: 0.0")
-    private let resolutionLabel = NSTextField(labelWithString: "INPUT 0x0 -> OUTPUT 0x0")
-    private let detailLabel = NSTextField(labelWithString: "Processing inactive")
+    private let sourceFPSLabel = OutputViewController.valueLabel()
+    private let generatedFPSLabel = OutputViewController.valueLabel()
+    private let captureFPSLabel = OutputViewController.valueLabel()
+    private let outputFPSLabel = OutputViewController.valueLabel()
+    private let resolutionLabel = OutputViewController.valueLabel()
+    private let frameGenerationBadge = GlassLabel.make("FG OFF", font: GlassFont.sidebarHeader, color: .secondaryLabelColor)
+    private let detailLabel = GlassLabel.make("Processing inactive", font: GlassFont.caption, color: .secondaryLabelColor)
 
     init(device: MTLDevice) {
         let view = MTKView(frame: .zero, device: device)
@@ -34,29 +35,44 @@ final class OutputViewController: NSViewController {
         telemetryContainer.material = .hudWindow
         telemetryContainer.blendingMode = .withinWindow
         telemetryContainer.state = .active
+        telemetryContainer.appearance = NSAppearance(named: .darkAqua)
         telemetryContainer.wantsLayer = true
-        telemetryContainer.layer?.cornerRadius = 10
+        telemetryContainer.layer?.cornerRadius = 14
+        telemetryContainer.layer?.cornerCurve = .continuous
+        telemetryContainer.layer?.borderWidth = 1
+        telemetryContainer.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
         telemetryContainer.layer?.masksToBounds = true
 
-        let stack = NSStackView(views: [sourceFPSLabel, generatedFPSLabel, captureFPSLabel, outputFPSLabel, resolutionLabel, detailLabel])
+        let title = GlassLabel.make("MetalDuck", font: GlassFont.groupTitle)
+        let header = NSStackView(views: [title, NSView(), frameGenerationBadge])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+
+        let grid = NSGridView(views: [
+            [Self.captionLabel("Source"), sourceFPSLabel],
+            [Self.captionLabel("Capture"), captureFPSLabel],
+            [Self.captionLabel("Generated"), generatedFPSLabel],
+            [Self.captionLabel("Output"), outputFPSLabel],
+            [Self.captionLabel("Resolution"), resolutionLabel]
+        ])
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.rowSpacing = 5
+        grid.columnSpacing = 18
+        grid.column(at: 1).xPlacement = .trailing
+
+        detailLabel.lineBreakMode = .byWordWrapping
+        detailLabel.maximumNumberOfLines = 2
+        detailLabel.preferredMaxLayoutWidth = 260
+
+        let stack = NSStackView(views: [header, grid, SeparatorLine(), detailLabel])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 4
-
-        sourceFPSLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
-        generatedFPSLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
-        captureFPSLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
-        outputFPSLabel.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
-        resolutionLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        detailLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-
-        sourceFPSLabel.textColor = NSColor(calibratedRed: 0.89, green: 0.95, blue: 1.0, alpha: 1.0)
-        generatedFPSLabel.textColor = NSColor(calibratedRed: 0.82, green: 0.97, blue: 0.84, alpha: 1.0)
-        captureFPSLabel.textColor = NSColor(calibratedRed: 0.85, green: 0.90, blue: 0.95, alpha: 1.0)
-        outputFPSLabel.textColor = NSColor(calibratedRed: 0.85, green: 0.90, blue: 0.95, alpha: 1.0)
-        resolutionLabel.textColor = NSColor(calibratedRed: 0.76, green: 0.80, blue: 0.85, alpha: 1.0)
-        detailLabel.textColor = NSColor(calibratedRed: 0.80, green: 0.84, blue: 0.88, alpha: 1.0)
+        stack.spacing = 10
+        for view in stack.arrangedSubviews {
+            view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
+            view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+        }
 
         telemetryContainer.addSubview(stack)
         rootView.addSubview(mtkView)
@@ -68,14 +84,14 @@ final class OutputViewController: NSViewController {
             mtkView.topAnchor.constraint(equalTo: rootView.topAnchor),
             mtkView.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
 
-            telemetryContainer.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 14),
-            telemetryContainer.topAnchor.constraint(equalTo: rootView.topAnchor, constant: 14),
+            telemetryContainer.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 16),
+            telemetryContainer.topAnchor.constraint(equalTo: rootView.topAnchor, constant: 16),
 
-            stack.leadingAnchor.constraint(equalTo: telemetryContainer.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: telemetryContainer.trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: telemetryContainer.topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: telemetryContainer.bottomAnchor, constant: -10),
-            stack.widthAnchor.constraint(greaterThanOrEqualToConstant: 250)
+            stack.leadingAnchor.constraint(equalTo: telemetryContainer.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: telemetryContainer.trailingAnchor, constant: -14),
+            stack.topAnchor.constraint(equalTo: telemetryContainer.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(equalTo: telemetryContainer.bottomAnchor, constant: -12),
+            stack.widthAnchor.constraint(equalToConstant: 260)
         ])
 
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(handleDoubleClick(_:)))
@@ -87,59 +103,61 @@ final class OutputViewController: NSViewController {
     }
 
     func updateStats(_ stats: RendererStats) {
-        sourceFPSLabel.stringValue = String(format: "SOURCE FPS: %.1f", stats.sourceFPS)
-        generatedFPSLabel.stringValue = String(format: "GEN FPS: %.1f", stats.generatedFPS)
-        captureFPSLabel.stringValue = String(format: "CAP FPS: %.1f", stats.captureFPS)
-        outputFPSLabel.stringValue = String(format: "OUT FPS: %.1f", stats.presentFPS)
-        resolutionLabel.stringValue = "INPUT \(Int(stats.inputSize.width))x\(Int(stats.inputSize.height)) -> OUTPUT \(Int(stats.outputSize.width))x\(Int(stats.outputSize.height))"
-        let fgState: String
+        sourceFPSLabel.stringValue = String(format: "%.1f fps", stats.sourceFPS)
+        captureFPSLabel.stringValue = String(format: "%.1f fps", stats.captureFPS)
+        generatedFPSLabel.stringValue = String(format: "%.1f fps", stats.generatedFPS)
+        outputFPSLabel.stringValue = String(format: "%.1f fps", stats.presentFPS)
+        resolutionLabel.stringValue = "\(Int(stats.inputSize.width))×\(Int(stats.inputSize.height)) → \(Int(stats.outputSize.width))×\(Int(stats.outputSize.height))"
+
         if !stats.frameGenerationEnabled {
-            fgState = "FG OFF"
+            setBadge("FG OFF", color: .secondaryLabelColor)
         } else if stats.generatedFPS > 0.5 {
-            fgState = "FG ACTIVE"
+            setBadge("FG ACTIVE", color: .systemGreen)
         } else {
-            fgState = "FG IDLE"
-        }
-        if stats.isRunning, stats.captureFPS > 20.0, stats.sourceFPS < (stats.captureFPS * 0.7) {
-            detailLabel.stringValue = String(
-                format: "Scale %.2fx  |  %@  |  Source app is throttling (keep source visible / use Display mode)",
-                stats.effectiveScale,
-                fgState
-            )
-        } else if stats.outputSize.width < stats.inputSize.width || stats.outputSize.height < stats.inputSize.height {
-            detailLabel.stringValue = String(
-                format: "Scale %.2fx  |  %@  |  Output window is smaller than source (no true upscale)",
-                stats.effectiveScale,
-                fgState
-            )
-        } else if stats.isRunning, stats.sourceFPS < 12.0, stats.captureFPS < 12.0 {
-            detailLabel.stringValue = String(
-                format: "Scale %.2fx  |  %@  |  Source throttled/paused (window hidden or app in background)",
-                stats.effectiveScale,
-                fgState
-            )
-        } else if stats.frameGenerationEnabled, stats.generatedFPS < 0.5, stats.presentFPS <= (stats.sourceFPS + 1.0) {
-            detailLabel.stringValue = String(
-                format: "Scale %.2fx  |  %@  |  Increase Target FPS / keep source visible",
-                stats.effectiveScale,
-                fgState
-            )
-        } else {
-            detailLabel.stringValue = String(format: "Scale %.2fx  |  %@  |  Processing active", stats.effectiveScale, fgState)
+            setBadge("FG IDLE", color: .systemOrange)
         }
 
-        // Status updates removed per user request for clean UI
+        let scale = String(format: "Scale %.2f×", stats.effectiveScale)
+        if stats.isRunning, stats.captureFPS > 20.0, stats.sourceFPS < (stats.captureFPS * 0.7) {
+            detailLabel.stringValue = "\(scale) · Source app is throttling. Keep it visible or use Display mode."
+        } else if stats.outputSize.width < stats.inputSize.width || stats.outputSize.height < stats.inputSize.height {
+            detailLabel.stringValue = "\(scale) · Output window is smaller than the source, so nothing is upscaled."
+        } else if stats.isRunning, stats.sourceFPS < 12.0, stats.captureFPS < 12.0 {
+            detailLabel.stringValue = "\(scale) · Source is paused or hidden."
+        } else if stats.frameGenerationEnabled, stats.generatedFPS < 0.5, stats.presentFPS <= (stats.sourceFPS + 1.0) {
+            detailLabel.stringValue = "\(scale) · Raise the target FPS or keep the source visible."
+        } else {
+            detailLabel.stringValue = "\(scale) · Processing active"
+        }
     }
 
     func setProcessingState(isRunning: Bool) {
-        if !isRunning {
-            sourceFPSLabel.stringValue = "SOURCE FPS: 0.0"
-            generatedFPSLabel.stringValue = "GEN FPS: 0.0"
-            captureFPSLabel.stringValue = "CAP FPS: 0.0"
-            outputFPSLabel.stringValue = "OUT FPS: 0.0"
-            resolutionLabel.stringValue = "INPUT 0x0 -> OUTPUT 0x0"
-            detailLabel.stringValue = "Processing inactive"
+        guard !isRunning else { return }
+        for label in [sourceFPSLabel, captureFPSLabel, generatedFPSLabel, outputFPSLabel, resolutionLabel] {
+            label.stringValue = "—"
         }
+        setBadge("FG OFF", color: .secondaryLabelColor)
+        detailLabel.stringValue = "Processing inactive"
+    }
+
+    func setTelemetryVisible(_ visible: Bool, animated: Bool) {
+        _ = view
+        telemetryContainer.isHidden = false
+        let target: CGFloat = visible ? 1 : 0
+        guard animated, !GlassMotion.reduceMotion else {
+            telemetryContainer.alphaValue = target
+            telemetryContainer.isHidden = !visible
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.25
+            telemetryContainer.animator().alphaValue = target
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.telemetryContainer.isHidden = self.telemetryContainer.alphaValue < 0.01
+            }
+        })
     }
 
     func setWaitingForFrames(message: String) {
@@ -158,7 +176,22 @@ final class OutputViewController: NSViewController {
         mtkView.colorspace = colorSpace
     }
 
+    private func setBadge(_ text: String, color: NSColor) {
+        frameGenerationBadge.stringValue = text
+        frameGenerationBadge.textColor = color
+    }
+
     @objc private func handleDoubleClick(_ gesture: NSClickGestureRecognizer) {
         view.window?.toggleFullScreen(nil)
+    }
+
+    private static func captionLabel(_ text: String) -> NSTextField {
+        GlassLabel.make(text, font: GlassFont.caption, color: .secondaryLabelColor)
+    }
+
+    private static func valueLabel() -> NSTextField {
+        let label = GlassLabel.make("—", font: GlassFont.value)
+        label.alignment = .right
+        return label
     }
 }

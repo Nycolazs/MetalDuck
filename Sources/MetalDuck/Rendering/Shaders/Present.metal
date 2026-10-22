@@ -81,126 +81,81 @@ fragment float4 fragmentPresent(
 }
 
 // =============================================================================
-// Frame Generation GPU Kernels (ported from MetalGoose)
+// Frame interpolation
 // =============================================================================
 
-struct FlowWarpParams {
-    float scale;
-};
-
-struct FlowComposeParams {
+struct FlowInterpolateParams {
     float t;
-    float errorThreshold;
-    float flowThreshold;
+    float flowGain;
+    float consistency;
+    float colorTolerance;
 };
 
-struct FlowOcclusionParams {
-    float threshold;
-};
-
-/// Warps a texture along optical flow vectors scaled by `params.scale`.
-kernel void flowWarp(
-    texture2d<half, access::sample> input [[texture(0)]],
-    texture2d<half, access::sample> flowTex [[texture(1)]],
-    texture2d<half, access::write> output [[texture(2)]],
-    constant FlowWarpParams& params [[buffer(0)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint width = output.get_width();
-    uint height = output.get_height();
-    if (gid.x >= width || gid.y >= height) return;
-    float2 size = float2(output.get_width(), output.get_height());
-    float2 uv = (float2(gid) + 0.5f) / size;
-    
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
-    
-    // Sample flow (using UV ensures full-screen coverage from low-res flow texture)
-    half2 flow = flowTex.sample(s, uv).rg * 2.0h;
-    
-    // Calculate UV-space offset
-    float2 flowSize = float2(flowTex.get_width(), flowTex.get_height());
-    float2 offset = float2(flow) * params.scale / flowSize;
-    float2 sampleUV = clamp(uv - offset, float2(0.0f), float2(1.0f));
-    
-    half4 color = input.sample(s, sampleUV);
-    output.write(color, gid);
-}
-
-/// Detects occluded regions via forward+backward flow consistency check.
-/// Outputs raw error magnitude in R channel.
-kernel void flowOcclusion(
-    texture2d<half, access::sample> flowForward [[texture(0)]],
-    texture2d<half, access::sample> flowBackward [[texture(1)]],
-    texture2d<half, access::write> occlusion [[texture(2)]],
-    constant FlowOcclusionParams& params [[buffer(0)]],
-    uint2 gid [[thread_position_in_grid]]
-) {
-    uint width = occlusion.get_width();
-    uint height = occlusion.get_height();
-    if (gid.x >= width || gid.y >= height) return;
-
-    float2 size = float2(width, height);
-    float2 uv = (float2(gid) + 0.5f) / size;
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
-    half2 f = flowForward.sample(s, uv).rg * 2.0h; 
-
-    // Check flow consistency: F(p) + B(p + F(p)) should be close to 0
-    float2 flowSize = float2(flowForward.get_width(), flowForward.get_height());
-    float2 uvNext = clamp(uv + float2(f) / flowSize, float2(0.0f), float2(1.0f));
-    half2 b = flowBackward.sample(s, uvNext).rg * 2.0h; 
-
-    // Output raw error magnitude
-    float2 sum = float2(f + b);
-    half err = half(length(sum));
-
-    occlusion.write(half4(err, 0.0h, 0.0h, 0.0h), gid);
-}
-
-/// Composes the final interpolated frame from warped prev/next frames
-/// using confidence-weighted blending based on flow and color errors.
-kernel void flowCompose(
-    texture2d<half, access::read> warpPrev [[texture(0)]],
-    texture2d<half, access::read> warpNext [[texture(1)]],
-    texture2d<half, access::sample> occlusion [[texture(2)]],
-    texture2d<half, access::read> origPrev [[texture(3)]],
-    texture2d<half, access::read> origNext [[texture(4)]],
-    texture2d<half, access::write> output [[texture(5)]],
-    constant FlowComposeParams& params [[buffer(0)]],
+/// Builds the frame at time `t` between `prev` and `next`.
+/// `forward` carries prev → next motion and `backward` next → prev, in flow-texture pixels
+/// after `flowGain`. A side is trusted only where its vector survives a round trip through the
+/// other field, so at the edge of a moving object the side that can still see the pixel wins.
+/// `colorTolerance` above zero also rejects warps whose two sides disagree in colour, which is
+/// how flow borrowed from a neighbouring pair of captures is kept honest.
+kernel void flowInterpolate(
+    texture2d<half, access::sample> prev [[texture(0)]],
+    texture2d<half, access::sample> next [[texture(1)]],
+    texture2d<half, access::sample> forward [[texture(2)]],
+    texture2d<half, access::sample> backward [[texture(3)]],
+    texture2d<half, access::write> output [[texture(4)]],
+    constant FlowInterpolateParams& params [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint width = output.get_width();
     uint height = output.get_height();
     if (gid.x >= width || gid.y >= height) return;
 
-    half4 wA = warpPrev.read(gid);
-    half4 wB = warpNext.read(gid);
-    float2 size = float2(width, height);
-    float2 uv = (float2(gid) + 0.5f) / size;
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    half t = half(params.t);
+    float2 uv = (float2(gid) + 0.5f) / float2(width, height);
+    float2 flowSize = float2(forward.get_width(), forward.get_height());
+    float t = params.t;
 
-    // Confidence check
-    half flowErr = occlusion.sample(s, uv).r;
-    half colorErr = length(wA.rgb - wB.rgb);
+    float2 f = float2(forward.sample(s, uv).rg) * params.flowGain;
+    float2 b = float2(backward.sample(s, uv).rg) * params.flowGain;
 
-    // Soft confidence mask - significantly loosened for Anime/Large Displacement
-    // Allow much larger flow errors before falling back
-    half flowConf = 1.0h - smoothstep(half(params.flowThreshold) * 2.0h, half(params.flowThreshold) * 10.0h, flowErr);
-    // Allow massive color divergence (typical of fast anime characters)
-    half colorConf = 1.0h - smoothstep(0.8h, 1.2h, colorErr);
-    half confidence = min(flowConf, colorConf);
+    float2 uvA = uv - f * t / flowSize;
+    float2 uvB = uv - b * (1.0f - t) / flowSize;
 
-    // Final composition
-    half4 oA = origPrev.read(gid);
-    half4 oB = origNext.read(gid);
-    half4 fallback = mix(oA, oB, t);
-    
-    half4 interpolated = mix(wA, wB, t);
-    half4 finalColor = mix(fallback, interpolated, confidence);
-    
-    // DEBUG: Add a very subtle green tint to generated frames 
-    // This confirms they are actually being shown to the user.
-    // finalColor.g += 0.05h; 
-    
-    output.write(finalColor, gid);
+    float2 fA = float2(forward.sample(s, uvA).rg) * params.flowGain;
+    float2 bA = float2(backward.sample(s, uvA + fA / flowSize).rg) * params.flowGain;
+    float2 bB = float2(backward.sample(s, uvB).rg) * params.flowGain;
+    float2 fB = float2(forward.sample(s, uvB + bB / flowSize).rg) * params.flowGain;
+
+    // Large motion is allowed a proportionally larger round-trip error.
+    float toleranceA = params.consistency + 0.08f * length(fA);
+    float toleranceB = params.consistency + 0.08f * length(bB);
+    float confA = 1.0f - smoothstep(toleranceA, toleranceA * 4.0f, length(fA + bA));
+    float confB = 1.0f - smoothstep(toleranceB, toleranceB * 4.0f, length(bB + fB));
+
+    half4 cA = prev.sample(s, clamp(uvA, 0.0f, 1.0f));
+    half4 cB = next.sample(s, clamp(uvB, 0.0f, 1.0f));
+
+    float weightA = (1.0f - t) * confA;
+    float weightB = t * confB;
+    float weightSum = weightA + weightB;
+    half4 warped = weightSum > 1e-4f
+        ? half4((float4(cA) * weightA + float4(cB) * weightB) / weightSum)
+        : mix(cA, cB, half(t));
+
+    float reliability = max(confA, confB);
+    if (params.colorTolerance > 0.0f) {
+        // Compare small neighbourhoods, not single texels, so the decision is the same across
+        // a whole badly tracked object instead of flickering between warp and blend.
+        constexpr float2 taps[5] = { float2(0, 0), float2(2, 0), float2(-2, 0), float2(0, 2), float2(0, -2) };
+        float colorError = 0.0f;
+        for (int i = 0; i < 5; i++) {
+            float2 d = taps[i] / flowSize;
+            colorError += length(float3(prev.sample(s, uvA + d).rgb - next.sample(s, uvB + d).rgb));
+        }
+        colorError *= 0.2f;
+        reliability *= 1.0f - smoothstep(params.colorTolerance, params.colorTolerance * 3.0f, colorError);
+    }
+
+    half4 blended = mix(prev.sample(s, uv), next.sample(s, uv), half(t));
+    output.write(mix(blended, warped, half(reliability)), gid);
 }

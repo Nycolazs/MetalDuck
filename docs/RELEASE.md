@@ -7,7 +7,7 @@ bash scripts/create_release.sh
 ```
 
 Generated artifact:
-- `dist/MetalDuck-macos-arm64.dmg`
+- `dist/MetalDuck-1.3.dmg`
 
 DMG contents:
 - `MetalDuck.app`
@@ -18,13 +18,13 @@ DMG contents:
 Example:
 
 ```bash
-git tag -a v0.1.0 -m "MetalDuck v0.1.0"
+git tag -a v1.3 -m "MetalDuck v1.3"
 git push origin main --tags
 
-gh release create v0.1.0 \
-  dist/MetalDuck-macos-arm64.dmg \
-  --title "MetalDuck v0.1.0" \
-  --notes-file docs/RELEASE_NOTES_v0.1.0.md
+gh release create v1.3 \
+  dist/MetalDuck-1.3.dmg \
+  --title "MetalDuck 1.3" \
+  --notes-file CHANGELOG.md
 ```
 
 ## Minimal release notes template

@@ -58,20 +58,40 @@ final class RendererCoordinator: NSObject {
     private var generatedFrameCounter: Int = 0
     private var fpsWindowStart: CFTimeInterval = CACurrentMediaTime()
 
+    private var latestFrameArrival: CFTimeInterval = 0
+
     private var upscaledScratchTexture: MTLTexture?
     private var secondaryUpscaledScratchTexture: MTLTexture?
-    private var stagedFrameTextures: [MTLTexture?] = [nil, nil]
-    private var stagedFrameWriteIndex: Int = 0
     private var currentFrameTexture: MTLTexture?
-    private var previousFrameTexture: MTLTexture?
-    private var lastCaptureHostTime: CFTimeInterval = 0
 
+    /// A capture copied into a staging slot, kept so output can trail capture by a fixed delay.
+    private struct BufferedFrame {
+        let slot: Int
+        let id: UInt64
+        let time: CFTimeInterval
+        let flowFrame: VisionFlowProvider.FlowFrame?
+    }
+
+    private static let stagingSlots = 5
+    /// Longer gaps mean the source was idle; only the last stretch of them is interpolated.
+    private static let maxInterpolationSpan: Double = 0.1
+    private var stagedFrameTextures: [MTLTexture?] = Array(repeating: nil, count: stagingSlots)
+    private var stagedFrameWriteIndex: Int = 0
+    private var bufferedFrames: [BufferedFrame] = []
+    private var nextFrameID: UInt64 = 0
+    private var captureInterval: Double = 1.0 / 60.0
+    private var recentCaptureIntervals: [Double] = []
+    private var presentationDelay: Double = 0
+    private let presentClock = PresentClock()
+    private var preferredScreenRate = 60
+    private var lastShownFrameID: UInt64?
+    private var latestCaptureTime: CFTimeInterval = 0
+    /// The source moment the frame being drawn depicts.
+    private var presentedContentTime: CFTimeInterval = 0
 
     private var lastInputTexture: MTLTexture?
     private var lastOutputTexture: MTLTexture?
     private var lastEffectiveScale: Float = 1.0
-    private var lastCaptureDeltaTime: Float = 1.0 / 60.0
-    private var lastMotionHintPixels: SIMD2<Float> = .zero
 
     private var renderPipelineState: MTLRenderPipelineState
     private var linearSampler: MTLSamplerState
@@ -81,17 +101,8 @@ final class RendererCoordinator: NSObject {
     private var running = false
     private var smoothedPresentFrameTime: Double = 1.0 / 60.0
     private var lastPresentHostTime: CFTimeInterval?
-    private var lastCaptureTimestamp: CMTime?
     private var dynamicScaleFactor: Float = 1.0
-    private var loggedFallbackFrameGeneration = false
-
-    // Presentation Pacing State
-    private var activePresentation: (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool)?
-    private var activePresentationExpiration: CFTimeInterval = 0
-
-    // If you have motion/depth data from a game integration layer,
-    // assign a provider to activate interpolation.
-    var frameGenerationAuxiliaryProvider: (() -> FrameGenerationAuxiliary?)?
+    private var loggedMetalFXFailure = false
 
     @MainActor
     init(
@@ -142,19 +153,30 @@ final class RendererCoordinator: NSObject {
         running = true
         resetFrameState()
         frameGenerationEngine.reset()
-        lastCaptureTimestamp = nil
         lastPresentHostTime = nil
         smoothedPresentFrameTime = 1.0 / 60.0
         dynamicScaleFactor = 1.0
+        let settings = settingsStore.snapshot()
+        PipelineLog.shared.logSessionRunning(
+            settings: settings,
+            capture: captureConfiguration,
+            target: activeCaptureTarget
+        )
     }
 
     @MainActor
     func stop() async {
         await captureService.stop()
         running = false
+        let settings = settingsStore.snapshot()
+        PipelineLog.shared.flush(
+            reason: "session stopped",
+            settings: settings,
+            configuredCaptureFPS: captureConfiguration.framesPerSecond,
+            targetPresentFPS: preferredPresentationFPS(for: settings)
+        )
         resetFrameState()
         frameGenerationEngine.reset()
-        lastCaptureTimestamp = nil
     }
 
     @MainActor
@@ -199,8 +221,10 @@ final class RendererCoordinator: NSObject {
         captureService.onFrame = { [weak self] frame in
             guard let self else { return }
 
+            let arrival = CACurrentMediaTime()
             self.frameLock.lock()
             self.latestFrame = frame
+            self.latestFrameArrival = arrival
             self.latestFrameSequence &+= 1
             self.frameLock.unlock()
 
@@ -212,19 +236,28 @@ final class RendererCoordinator: NSObject {
         }
 
         captureService.onError = { [weak self] error in
-            NSLog("Capture stream stopped with error: \(error.localizedDescription)")
+            PipelineLog.shared.event("capture", "stream stopped with error: \(error.localizedDescription)")
+            if let self {
+                let settings = self.settingsStore.snapshot()
+                PipelineLog.shared.flush(
+                    reason: "capture error",
+                    settings: settings,
+                    configuredCaptureFPS: self.captureConfiguration.framesPerSecond,
+                    targetPresentFPS: self.preferredPresentationFPS(for: settings)
+                )
+            }
             self?.running = false
             self?.onError?(error)
         }
     }
 
-    private func snapshotLatestFrame() -> (frame: CapturedFrame, sequence: UInt64)? {
+    private func snapshotLatestFrame() -> (frame: CapturedFrame, sequence: UInt64, arrival: CFTimeInterval)? {
         frameLock.lock()
         defer { frameLock.unlock() }
         guard let latestFrame else {
             return nil
         }
-        return (latestFrame, latestFrameSequence)
+        return (latestFrame, latestFrameSequence, latestFrameArrival)
     }
 
     private func resetFrameState() {
@@ -236,17 +269,18 @@ final class RendererCoordinator: NSObject {
 
         upscaledScratchTexture = nil
         secondaryUpscaledScratchTexture = nil
-        stagedFrameTextures = [nil, nil]
+        stagedFrameTextures = Array(repeating: nil, count: Self.stagingSlots)
         stagedFrameWriteIndex = 0
+        bufferedFrames.removeAll()
+        captureInterval = 1.0 / Double(max(captureConfiguration.framesPerSecond, 1))
+        recentCaptureIntervals.removeAll()
+        presentationDelay = 0
+        presentClock.reset()
+        lastShownFrameID = nil
         currentFrameTexture = nil
-        previousFrameTexture = nil
-        lastMotionHintPixels = .zero
         lastInputTexture = nil
         lastOutputTexture = nil
         lastEffectiveScale = 1.0
-        lastCaptureDeltaTime = 1.0 / 60.0
-        lastMotionHintPixels = .zero
-        loggedFallbackFrameGeneration = false
 
         statsLock.lock()
         rawCaptureFrameCounter = 0
@@ -254,9 +288,6 @@ final class RendererCoordinator: NSObject {
         generatedFrameCounter = 0
         fpsWindowStart = CACurrentMediaTime()
         statsLock.unlock()
-
-        activePresentation = nil
-        activePresentationExpiration = 0
     }
 
     private static func buildPresentationResources(
@@ -500,45 +531,35 @@ fragment float4 fragmentPresent(
 
     private func stageCurrentFrameTexture(
         commandBuffer: MTLCommandBuffer,
-        sourceTexture: MTLTexture,
+        frame: CapturedFrame,
+        arrival: CFTimeInterval,
         frameGenerationEnabled: Bool
     ) -> MTLTexture? {
-        // Update capture timing for the time-based clock
-        lastCaptureHostTime = CACurrentMediaTime()
-        
+        let sourceTexture = frame.texture
+        latestCaptureTime = captureTime(for: frame.timestamp, arrival: arrival)
         if !frameGenerationEnabled {
             currentFrameTexture = sourceTexture
-            previousFrameTexture = nil
+            bufferedFrames.removeAll()
             return sourceTexture
         }
 
-        let writeIndex = stagedFrameWriteIndex
-        let readIndex = (writeIndex + 1) % 2
+        let slot = stagedFrameWriteIndex
+        bufferedFrames.removeAll { $0.slot == slot }
+        if let newest = bufferedFrames.last,
+           let newestTexture = stagedFrameTextures[newest.slot],
+           newestTexture.width != sourceTexture.width ||
+           newestTexture.height != sourceTexture.height ||
+           newestTexture.pixelFormat != sourceTexture.pixelFormat {
+            bufferedFrames.removeAll()
+        }
 
         guard let writeTexture = ensureStagedTexture(
-            index: writeIndex,
+            index: slot,
             width: sourceTexture.width,
             height: sourceTexture.height,
             pixelFormat: sourceTexture.pixelFormat
         ) else {
             return nil
-        }
-
-        let readTexture = stagedFrameTextures[readIndex]
-        let hasValidPreviousTexture: Bool
-        if let readTexture {
-            hasValidPreviousTexture =
-                readTexture.width == sourceTexture.width &&
-                readTexture.height == sourceTexture.height &&
-                readTexture.pixelFormat == sourceTexture.pixelFormat
-        } else {
-            hasValidPreviousTexture = false
-        }
-
-        if hasValidPreviousTexture {
-            previousFrameTexture = readTexture
-        } else {
-            previousFrameTexture = nil
         }
 
         encodeTextureCopy(
@@ -547,9 +568,51 @@ fragment float4 fragmentPresent(
             to: writeTexture
         )
 
+        var time = latestCaptureTime
+        if let newest = bufferedFrames.last {
+            time = max(time, newest.time + 0.001)
+            let delta = time - newest.time
+            if delta < Self.maxInterpolationSpan * 2.5 {
+                recentCaptureIntervals.append(delta)
+                if recentCaptureIntervals.count > 24 {
+                    recentCaptureIntervals.removeFirst(recentCaptureIntervals.count - 24)
+                }
+                // A high percentile, so the next capture has nearly always arrived by the
+                // time output reaches it, even when the source cadence wobbles.
+                let sorted = recentCaptureIntervals.sorted()
+                let upper = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.85))]
+                captureInterval = min(max(upper, 1.0 / 240.0), Self.maxInterpolationSpan)
+            }
+        }
+
+        nextFrameID &+= 1
+        let flowFrame = frameGenerationEngine.prepareFlowFrame(
+            from: writeTexture,
+            id: nextFrameID,
+            time: time,
+            commandBuffer: commandBuffer
+        )
+        if let flowFrame, let previousFlowFrame = bufferedFrames.last?.flowFrame {
+            frameGenerationEngine.requestFlow(previous: previousFlowFrame, next: flowFrame, after: commandBuffer)
+        }
+
+        bufferedFrames.append(BufferedFrame(slot: slot, id: nextFrameID, time: time, flowFrame: flowFrame))
+        if bufferedFrames.count > Self.stagingSlots {
+            bufferedFrames.removeFirst(bufferedFrames.count - Self.stagingSlots)
+        }
+        stagedFrameWriteIndex = (slot + 1) % Self.stagingSlots
         currentFrameTexture = writeTexture
-        stagedFrameWriteIndex = readIndex
         return writeTexture
+    }
+
+    /// Capture time on the host clock. ScreenCaptureKit stamps frames with it; anything else
+    /// that looks off falls back to when the frame reached us.
+    private func captureTime(for timestamp: CMTime, arrival: CFTimeInterval) -> CFTimeInterval {
+        let seconds = CMTimeGetSeconds(timestamp)
+        if seconds.isFinite, abs(arrival - seconds) < 0.25 {
+            return seconds
+        }
+        return arrival
     }
 
     private func ensureStagedTexture(
@@ -579,10 +642,6 @@ fragment float4 fragmentPresent(
         return texture
     }
 
-
-
-
-
     private func presentationScale(
         sourceTexture: MTLTexture,
         drawableSize: CGSize
@@ -596,24 +655,6 @@ fragment float4 fragmentPresent(
         }
 
         return SIMD2<Float>(1.0, drawableAspect / sourceAspect)
-    }
-
-    private func captureDeltaTime(for timestamp: CMTime) -> Float {
-        let delta: Float
-        if let previous = lastCaptureTimestamp {
-            let diff = CMTimeSubtract(timestamp, previous)
-            let seconds = CMTimeGetSeconds(diff)
-            if seconds.isFinite, seconds > 0 {
-                delta = Float(seconds)
-            } else {
-                delta = 1.0 / 60.0
-            }
-        } else {
-            delta = 1.0 / 60.0
-        }
-
-        lastCaptureTimestamp = timestamp
-        return max(1.0 / 240.0, delta)
     }
 
     private func updatePresentFrameTime() {
@@ -689,12 +730,12 @@ fragment float4 fragmentPresent(
         scratchBuffer: inout MTLTexture?,
         settings: RenderSettings,
         scale: Float
-    ) -> MTLTexture {
+    ) -> (texture: MTLTexture, fellBack: Bool) {
         let outputWidth = max(1, Int(Float(inputTexture.width) * scale))
         let outputHeight = max(1, Int(Float(inputTexture.height) * scale))
 
         if outputWidth == inputTexture.width, outputHeight == inputTexture.height {
-            return inputTexture
+            return (inputTexture, false)
         }
 
         switch settings.upscalingAlgorithm {
@@ -705,7 +746,7 @@ fragment float4 fragmentPresent(
                 height: outputHeight,
                 pixelFormat: inputTexture.pixelFormat
             ) else {
-                return inputTexture
+                return (inputTexture, false)
             }
 
             encodeNativeResample(
@@ -714,7 +755,7 @@ fragment float4 fragmentPresent(
                 destinationTexture: outputTexture,
                 samplingMode: settings.samplingMode
             )
-            return outputTexture
+            return (outputTexture, false)
 
         case .metalFXSpatial, .metalFXTemporal:
             guard let outputTexture = ensureReusableTexture(
@@ -723,7 +764,7 @@ fragment float4 fragmentPresent(
                 height: outputHeight,
                 pixelFormat: inputTexture.pixelFormat
             ) else {
-                return inputTexture
+                return (inputTexture, true)
             }
 
             do {
@@ -732,68 +773,97 @@ fragment float4 fragmentPresent(
                     inputTexture: inputTexture,
                     outputTexture: outputTexture
                 )
-                return outputTexture
+                return (outputTexture, false)
             } catch {
-                NSLog("MetalFX upscaling failed, falling back to native linear: \(error.localizedDescription)")
-                return inputTexture
+                if !loggedMetalFXFailure {
+                    loggedMetalFXFailure = true
+                    PipelineLog.shared.event("upscale", "MetalFX failed: \(error.localizedDescription)")
+                }
+                return (inputTexture, true)
             }
         }
     }
 
     private func resolvePresentationTextures(
         commandBuffer: MTLCommandBuffer,
-        settings: RenderSettings,
-        deltaTime: Float
+        settings: RenderSettings
     ) -> (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool)? {
         guard let currentTexture = currentFrameTexture else { return nil }
+        presentedContentTime = latestCaptureTime
 
-        let now = CACurrentMediaTime()
-
-        // If we have an active presentation that hasn't expired, keep showing it (crucial for 120Hz screens)
-        if let active = activePresentation, (now - activePresentationExpiration) < -0.0005 {
-            return active
+        guard settings.frameGenerationEnabled, bufferedFrames.count >= 2 else {
+            PipelineLog.shared.notePresent(.passthrough)
+            return (currentTexture, currentTexture, 0.0, false)
         }
 
-        guard settings.frameGenerationEnabled, let previousTexture = previousFrameTexture else {
-            let result: (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool) = (currentTexture, currentTexture, 0.0, false)
-            activePresentation = result
-            activePresentationExpiration = now + (1.0 / Double(preferredPresentationFPS(for: settings)))
-            return result
-        }
-
-        // Time-Based Interpolation Logic
-        // Calculate where we are between the last capture and the next expected capture
-        // Use the actual measured interval between the last two frames to support variable frame rates (like 24fps anime)
-        let expectedCaptureInterval = Double(max(1.0 / 240.0, lastCaptureDeltaTime))
-        let elapsedSinceCapture = now - lastCaptureHostTime
-        
-        // Calculate blend factor t [0.0...1.0]
-        // We use a small lag buffer to ensure we always have 'future' data for the next frames
-        let t = Float(max(0.0, min(1.0, elapsedSinceCapture / expectedCaptureInterval)))
-        
-        var result: (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool)
-
-        // Try Vision flow-based interpolation first
-        if frameGenerationEngine.isSupported,
-           let interpolated = frameGenerationEngine.generateInterpolatedFrame(
-               commandBuffer: commandBuffer,
-               prevTexture: previousTexture,
-               currentTexture: currentTexture,
-               blendFactor: t
-           ) {
-            result = (interpolated, interpolated, 0.0, true)
+        // Output trails capture by one interval plus the time flow takes, so the pair around
+        // the displayed moment is already captured and usually already has its own flow.
+        // The ring only reaches a few captures back, which caps the delay.
+        let flowLatency = min(max(frameGenerationEngine.flowReadyLatency, 0), 0.05)
+        let targetDelay = min(captureInterval + flowLatency + 0.004, captureInterval * Double(Self.stagingSlots - 2))
+        // Any change in delay shows up as a change in speed, so it only drifts slowly
+        // (about 3% of real time) unless it is far off.
+        if presentationDelay == 0 || abs(targetDelay - presentationDelay) > 0.03 {
+            presentationDelay = targetDelay
         } else {
-            // Fallback: shader-based blend
-            result = (previousTexture, currentTexture, t, true)
+            presentationDelay += min(max(targetDelay - presentationDelay, -0.00025), 0.00025)
+        }
+        let displayTime = presentClock.alignedNow(period: 1.0 / Double(max(1, preferredScreenRate))) - presentationDelay
+
+        guard let index = bufferedFrames.lastIndex(where: { $0.time <= displayTime }),
+              index < bufferedFrames.count - 1 else {
+            let shown = displayTime < bufferedFrames[0].time ? bufferedFrames[0] : bufferedFrames[bufferedFrames.count - 1]
+            presentedContentTime = shown.time
+            return presentCapturedFrame(shown) ?? (currentTexture, currentTexture, 0.0, false)
         }
 
-        let targetFPS = Double(preferredPresentationFPS(for: settings))
-        let holdDuration = targetFPS > 0 ? (1.0 / targetFPS) : (1.0 / 60.0)
+        let older = bufferedFrames[index]
+        let newer = bufferedFrames[index + 1]
+        guard let olderTexture = stagedFrameTextures[older.slot],
+              let newerTexture = stagedFrameTextures[newer.slot] else {
+            PipelineLog.shared.notePresent(.passthrough)
+            return (currentTexture, currentTexture, 0.0, false)
+        }
 
-        activePresentation = result
-        activePresentationExpiration = now + holdDuration
-        
-        return result
+        presentedContentTime = displayTime
+        let start = max(older.time, newer.time - Self.maxInterpolationSpan)
+        let t = Float(min(max((displayTime - start) / max(newer.time - start, 0.001), 0), 1))
+        if t <= 0.02 {
+            return presentCapturedFrame(older) ?? (olderTexture, olderTexture, 0.0, false)
+        }
+        if t >= 0.98 {
+            return presentCapturedFrame(newer) ?? (newerTexture, newerTexture, 0.0, false)
+        }
+        lastShownFrameID = nil
+
+        switch frameGenerationEngine.attemptInterpolation(
+            commandBuffer: commandBuffer,
+            previous: GenerationFrame(texture: olderTexture, id: older.id),
+            next: GenerationFrame(texture: newerTexture, id: newer.id),
+            t: t
+        ) {
+        case .produced(let interpolated, let flowWidth, let flowHeight, let flowFrameID, let latestCaptureID):
+            PipelineLog.shared.notePresent(.flow(
+                t: t,
+                flowWidth: flowWidth,
+                flowHeight: flowHeight,
+                flowFrameID: flowFrameID,
+                latestCaptureID: latestCaptureID
+            ))
+            return (interpolated, interpolated, 0.0, true)
+        case .failed(let reason):
+            PipelineLog.shared.notePresent(.blend(t: t, reason: reason))
+            return (olderTexture, newerTexture, t, true)
+        }
+    }
+
+    private func presentCapturedFrame(
+        _ frame: BufferedFrame
+    ) -> (primary: MTLTexture, secondary: MTLTexture, blendFactor: Float, isGenerated: Bool)? {
+        guard let texture = stagedFrameTextures[frame.slot] else { return nil }
+        PipelineLog.shared.notePresent(lastShownFrameID == frame.id ? .repeated : .passthrough)
+        lastShownFrameID = frame.id
+        return (texture, texture, 0.0, false)
     }
 
     private func publishStatsIfNeeded(
@@ -848,6 +918,19 @@ extension RendererCoordinator: MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        let drawStart = CACurrentMediaTime()
+        defer {
+            if running {
+                let settings = settingsStore.snapshot()
+                PipelineLog.shared.finishFrame(
+                    drawMilliseconds: (CACurrentMediaTime() - drawStart) * 1000,
+                    settings: settings,
+                    configuredCaptureFPS: captureConfiguration.framesPerSecond,
+                    targetPresentFPS: preferredPresentationFPS(for: settings)
+                )
+            }
+        }
+
         guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
               let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor else {
@@ -873,44 +956,29 @@ extension RendererCoordinator: MTKViewDelegate {
         }
 
         let frameSnapshot = snapshotLatestFrame()
-        if let frameSnapshot {
-            if frameSnapshot.sequence != processedFrameSequence {
-                if let stagedTexture = stageCurrentFrameTexture(
-                    commandBuffer: commandBuffer,
-                    sourceTexture: frameSnapshot.frame.texture,
-                    frameGenerationEnabled: settings.frameGenerationEnabled
-                ) {
-                    processedFrameSequence = frameSnapshot.sequence
-                    lastCaptureDeltaTime = captureDeltaTime(for: frameSnapshot.frame.timestamp)
-                    lastMotionHintPixels = frameSnapshot.frame.motionHint
-                    lastInputTexture = frameSnapshot.frame.texture
-                    
-                    let statsScale = effectiveScale(
-                        for: settings,
-                        inputTexture: frameSnapshot.frame.texture,
-                        drawableSize: view.drawableSize
-                    )
-                    lastEffectiveScale = statsScale
+        if let frameSnapshot, frameSnapshot.sequence != processedFrameSequence {
+            if stageCurrentFrameTexture(
+                commandBuffer: commandBuffer,
+                frame: frameSnapshot.frame,
+                arrival: frameSnapshot.arrival,
+                frameGenerationEnabled: settings.frameGenerationEnabled
+            ) != nil {
+                processedFrameSequence = frameSnapshot.sequence
+                lastInputTexture = frameSnapshot.frame.texture
 
-                    // Notify the engine about the new unscaled frame (for async Vision flow)
-                    if settings.frameGenerationEnabled {
-                        frameGenerationEngine.onNewCapturedFrame(stagedTexture)
-                    }
-
-
-                }
-            }
-        } else {
-            if !settings.frameGenerationEnabled {
-                // Logic for disabling generation goes here if needed
+                lastEffectiveScale = effectiveScale(
+                    for: settings,
+                    inputTexture: frameSnapshot.frame.texture,
+                    drawableSize: view.drawableSize
+                )
             }
         }
 
         guard let presentation = resolvePresentationTextures(
             commandBuffer: commandBuffer,
-            settings: settings,
-            deltaTime: lastCaptureDeltaTime
+            settings: settings
         ) else {
+            PipelineLog.shared.notePresent(.noFrame)
             if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
                 encoder.endEncoding()
             }
@@ -926,26 +994,48 @@ extension RendererCoordinator: MTKViewDelegate {
             drawableSize: view.drawableSize
         )
         
-        let finalPrimary = upscaleIfNeeded(
+        let primaryUpscale = upscaleIfNeeded(
             commandBuffer: commandBuffer,
             inputTexture: presentation.primary,
             scratchBuffer: &upscaledScratchTexture,
             settings: settings,
             scale: scale
         )
+        let finalPrimary = primaryUpscale.texture
 
         let finalSecondary: MTLTexture
+        let secondaryFellBack: Bool
         if presentation.secondary === presentation.primary {
             finalSecondary = finalPrimary
+            secondaryFellBack = false
         } else {
-            finalSecondary = upscaleIfNeeded(
+            let secondaryUpscale = upscaleIfNeeded(
                 commandBuffer: commandBuffer,
                 inputTexture: presentation.secondary,
                 scratchBuffer: &secondaryUpscaledScratchTexture,
                 settings: settings,
                 scale: scale
             )
+            finalSecondary = secondaryUpscale.texture
+            secondaryFellBack = secondaryUpscale.fellBack
         }
+
+        let upscaleAlgorithm: String
+        if !primaryUpscale.fellBack,
+           finalPrimary.width == presentation.primary.width,
+           finalPrimary.height == presentation.primary.height {
+            upscaleAlgorithm = "identity"
+        } else {
+            upscaleAlgorithm = settings.upscalingAlgorithm.rawValue
+        }
+        PipelineLog.shared.noteUpscale(
+            algorithm: upscaleAlgorithm,
+            inputWidth: presentation.primary.width,
+            inputHeight: presentation.primary.height,
+            outputWidth: finalPrimary.width,
+            outputHeight: finalPrimary.height,
+            fellBack: primaryUpscale.fellBack || secondaryFellBack
+        )
 
         
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
@@ -987,7 +1077,50 @@ extension RendererCoordinator: MTKViewDelegate {
             effectiveScale: lastEffectiveScale
         )
 
+        let contentTime = presentedContentTime
+        let screenFPS = view.window?.screen?.maximumFramesPerSecond ?? targetFPS
+        preferredScreenRate = min(targetFPS, screenFPS)
+        let expectedInterval = 1.0 / Double(max(1, preferredScreenRate))
+        let clock = presentClock
+        drawable.addPresentedHandler { presented in
+            clock.notePresented(presented.presentedTime)
+            PipelineLog.shared.notePresented(
+                presentedTime: presented.presentedTime,
+                contentTime: contentTime,
+                expectedInterval: expectedInterval
+            )
+        }
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+}
+
+/// Tracks when drawables actually reach the screen, so output time can follow the display's
+/// refresh grid instead of whenever the draw callback happened to run.
+private final class PresentClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastPresented: CFTimeInterval = 0
+
+    func notePresented(_ time: CFTimeInterval) {
+        guard time > 0 else { return }
+        lock.lock()
+        lastPresented = time
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        lastPresented = 0
+        lock.unlock()
+    }
+
+    /// Now, snapped to the nearest refresh of the grid the last presented frame sat on.
+    func alignedNow(period: Double) -> CFTimeInterval {
+        let now = CACurrentMediaTime()
+        lock.lock()
+        let anchor = lastPresented
+        lock.unlock()
+        guard anchor > 0, period > 0, now - anchor < 1 else { return now }
+        return anchor + ((now - anchor) / period).rounded() * period
     }
 }

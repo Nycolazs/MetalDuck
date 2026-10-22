@@ -10,11 +10,15 @@ final class MainViewController: NSViewController {
         let target: CaptureTarget
     }
 
+    private static let showHUDKey = "com.metalduck.showHUD"
+
     private let controlPanel = ControlPanelView(frame: .zero)
     private let renderer: RendererCoordinator
     private let settingsStore = SettingsStore()
     private let profileManager = ProfileManager.shared
     private let overlayController: ScalingOverlayController
+    private let menuBar = MenuBarController()
+    private let outsideClickDismisser = OutsideClickDismisser()
 
     private var currentProcessObservation: NSKeyValueObservation?
 
@@ -70,7 +74,7 @@ final class MainViewController: NSViewController {
     }
 
     override func loadView() {
-        let rootView = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 920))
+        let rootView = NSView(frame: NSRect(x: 0, y: 0, width: 1180, height: 880))
         rootView.addSubview(controlPanel)
         controlPanel.translatesAutoresizingMaskIntoConstraints = false
 
@@ -98,7 +102,12 @@ final class MainViewController: NSViewController {
         controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
         applyProfile(profileManager.activeProfile)
         
+        let showHUD = UserDefaults.standard.object(forKey: Self.showHUDKey) as? Bool ?? true
+        controlPanel.setHUDVisible(showHUD)
+        overlayController.setHUDVisible(showHUD, animated: false)
+
         controlPanel.setRunning(false)
+        menuBar.setRunning(false)
         controlPanel.setStatus("Ready")
         overlayController.hide()
         updateWindowTitle()
@@ -114,14 +123,80 @@ final class MainViewController: NSViewController {
                 self.controlPanelDidPressStart(self.controlPanel)
             }
         }
+        ShortcutManager.shared.onPanic = { [weak self] in
+            guard let self, self.renderer.isRunning else { return }
+            PipelineLog.shared.event("session", "panic stop")
+            self.controlPanelDidPressStop(self.controlPanel)
+        }
         ShortcutManager.shared.update(settings: settingsStore.shortcut)
+        menuBar.onStart = { [weak self] in
+            guard let self else { return }
+            self.controlPanelDidPressStart(self.controlPanel)
+        }
+        menuBar.onStop = { [weak self] in
+            guard let self else { return }
+            PipelineLog.shared.event("session", "stop from the menu bar")
+            self.controlPanelDidPressStop(self.controlPanel)
+        }
+        menuBar.onShowWindow = { [weak self] in
+            guard let window = self?.view.window else { return }
+            window.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+        menuBar.onQuit = {
+            NSApplication.shared.terminate(nil)
+        }
+        refreshSafetyHint()
+    }
+
+    private var hasStopShortcut: Bool {
+        let shortcut = settingsStore.shortcut
+        return shortcut.enabled && shortcut.keyCode != nil
+    }
+
+    private func refreshSafetyHint() {
+        menuBar.setHint(Self.safetyHint(settingsStore.shortcut))
+    }
+
+    static func safetyHint(_ shortcut: ShortcutSettings) -> String {
+        let panic = ShortcutManager.panicDisplay
+        guard shortcut.enabled, shortcut.keyCode != nil else { return panic }
+        return "\(shortcut.displayString)  ·  \(panic)"
+    }
+
+    /// Presented rate is exactly capture × multiplier, or the capture rate when generation is off.
+    private func alignedOutputTarget(captureFPS: Int, settings: RenderSettings) -> Int {
+        let capture = max(captureFPS, 1)
+        guard settings.frameGenerationEnabled else { return capture }
+        return capture * settings.frameGenerationMode.multiplier
+    }
+
+    private func alignOutputTarget(syncUI: Bool) {
+        updateRenderSettings(syncUI: syncUI) { settings in
+            settings.targetPresentationFPS = self.alignedOutputTarget(
+                captureFPS: self.captureConfiguration.framesPerSecond,
+                settings: settings
+            )
+        }
+    }
+
+    private func outputTargetStatus() -> String {
+        let settings = settingsStore.snapshot()
+        let capture = max(captureConfiguration.framesPerSecond, 1)
+        if settings.frameGenerationEnabled {
+            let multiplier = settings.frameGenerationMode.multiplier
+            return "Output: \(capture) × \(multiplier) = \(capture * multiplier) fps"
+        }
+        return "Output: \(capture) fps, frame generation off"
     }
 
 
     func stop() async {
+        RunGuard.shared.disarm()
         await renderer.stop()
         DispatchQueue.main.async { [weak self] in
             self?.controlPanel.setRunning(false)
+            self?.menuBar.setRunning(false)
             self?.controlPanel.setStatus("Stopped")
             self?.overlayController.hide()
             self?.updateWindowTitle()
@@ -158,6 +233,7 @@ final class MainViewController: NSViewController {
                 lastAutoRecoveryTime = now
                 controlPanel.setStatus("Tracking new window (Fullscreen?)...", isError: false)
                 
+                PipelineLog.shared.event("capture", "auto-recovery \(autoRecoveryAttemptCount)/3 after stalled frames")
                 Task {
                     await renderer.stop()
                     try? await Task.sleep(nanoseconds: 250_000_000)
@@ -179,19 +255,7 @@ final class MainViewController: NSViewController {
 
     private func handleRendererStats(_ stats: RendererStats) {
         lastStatsUpdateTime = CACurrentMediaTime()
-        let inputLabel = "\(Int(stats.inputSize.width))x\(Int(stats.inputSize.height))"
-        let outputLabel = "\(Int(stats.outputSize.width))x\(Int(stats.outputSize.height))"
-        let label = String(
-            format: "SOURCE %.1f FPS  |  OUT %.1f FPS\nGEN %.1f FPS  |  CAP %.1f FPS\n%@ -> %@  |  Scale %.2fx",
-            stats.sourceFPS,
-            stats.presentFPS,
-            stats.generatedFPS,
-            stats.captureFPS,
-            inputLabel,
-            outputLabel,
-            stats.effectiveScale
-        )
-        controlPanel.setStats(label)
+        controlPanel.setStats(stats)
         overlayController.updateStats(stats)
         if stats.isRunning {
             controlPanel.setStatus("Running")
@@ -206,14 +270,7 @@ final class MainViewController: NSViewController {
             return
         }
 
-        let settings = settingsStore.snapshot()
-        let scaleString = String(format: "%.2fx", settings.outputScale)
-        let nativeMatch = settings.matchOutputResolution ? "MatchOut On" : "MatchOut Off"
-        let dynamic = settings.dynamicResolutionEnabled ? "DRS On" : "DRS Off"
-        let fg = settings.frameGenerationEnabled ? "FG \(settings.frameGenerationMode.rawValue)" : "FG Off"
-
-        let title = "MetalDuck | \(settings.upscalingAlgorithm.rawValue) | \(scaleString) | \(nativeMatch) | \(dynamic) | \(fg)"
-        window.title = title
+        window.title = "MetalDuck"
     }
 
     private func refreshCaptureSources() async {
@@ -438,24 +495,15 @@ final class MainViewController: NSViewController {
     }
 
     private func applyProfile(_ profile: Profile) {
-        let settings = profile.settings
-        let capture = profile.capture
-        
-        applySettings(settings)
-        applyCaptureConfiguration(capture)
-        
-        controlPanel.apply(settings: settings, capture: capture, profileName: profile.name)
-        
-        // Update window title
-        let titleParts = [
-            "MetalDuck",
-            settings.upscalingAlgorithm.rawValue,
-            String(format: "%.2fx", settings.outputScale),
-            settings.matchOutputResolution ? "MatchOut On" : "MatchOut Off",
-            settings.dynamicResolutionEnabled ? "DRS On" : "DRS Off",
-            settings.frameGenerationEnabled ? "FG \(settings.frameGenerationMode.rawValue)" : "FG Off"
-        ]
-        view.window?.title = titleParts.joined(separator: " | ")
+        applySettings(profile.settings)
+        applyCaptureConfiguration(profile.capture)
+        alignOutputTarget(syncUI: false)
+        controlPanel.apply(
+            settings: settingsStore.snapshot(),
+            capture: profile.capture,
+            profileName: profile.name
+        )
+        updateWindowTitle()
     }
 
     private func applySettings(_ settings: RenderSettings) {
@@ -489,45 +537,9 @@ final class MainViewController: NSViewController {
         switch character {
         case " ":
             if renderer.isRunning {
-                Task { [weak self] in
-                    await self?.renderer.stop()
-                    await MainActor.run {
-                        self?.controlPanel.setRunning(false)
-                        self?.controlPanel.setStatus("Stopped")
-                        self?.overlayController.hide()
-                        self?.updateWindowTitle()
-                    }
-                }
+                controlPanelDidPressStop(controlPanel)
             } else {
-                Task { [weak self] in
-                    guard let self else { return }
-                    let target = self.selectedCaptureTarget()
-                    let outputDisplayID = self.outputDisplayID(for: target)
-                    do {
-                        await MainActor.run {
-                            self.overlayController.show(on: outputDisplayID)
-                            self.overlayController.setWaitingForFrames(message: "Starting capture...")
-                        }
-
-                        try await self.renderer.reconfigureCapture(target: target)
-                        try await self.renderer.start()
-                        await MainActor.run {
-                            self.controlPanel.setRunning(true)
-                            self.controlPanel.setStatus("Running (waiting for frames...)")
-                            self.overlayController.setWaitingForFrames(message: "Processing active")
-                            self.updateWindowTitle()
-                            self.scheduleCaptureHealthCheck()
-                        }
-                    } catch {
-                        NSLog("Renderer start failed: \(error.localizedDescription)")
-                        await MainActor.run {
-                            self.controlPanel.setRunning(false)
-                            self.controlPanel.setStatus("Start failed", isError: true)
-                            self.overlayController.setCaptureError("Start failed")
-                            self.overlayController.hide()
-                        }
-                    }
-                }
+                controlPanelDidPressStart(controlPanel)
             }
         default:
             super.keyDown(with: event)
@@ -537,7 +549,25 @@ final class MainViewController: NSViewController {
 
 extension MainViewController: ControlPanelViewDelegate {
     func controlPanelDidPressStart(_ panel: ControlPanelView) {
+        guard hasStopShortcut else {
+            panel.setStatus("Set a stop shortcut before starting.")
+            view.window?.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            let sheet = StopShortcutViewController(settingsStore: settingsStore)
+            sheet.onReady = { [weak self] in
+                self?.refreshSafetyHint()
+                self?.beginScaling()
+            }
+            presentTransientSheet(sheet)
+            return
+        }
+        beginScaling()
+    }
+
+    private func beginScaling() {
+        let panel = controlPanel
         guard ensureScreenCapturePermission() else {
+            PipelineLog.shared.event("session", "start refused: Screen Recording permission denied")
             panel.setStatus("Screen Recording permission denied.", isError: true)
             overlayController.setCaptureError("Screen Recording permission denied")
             return
@@ -555,15 +585,18 @@ extension MainViewController: ControlPanelViewDelegate {
                 try await self.renderer.start()
                 await MainActor.run {
                     panel.setRunning(true)
+                    self.menuBar.setRunning(true)
                     panel.setStatus("Running (waiting for frames...)")
                     self.overlayController.setWaitingForFrames(message: "Processing active")
                     self.scheduleCaptureHealthCheck()
                     self.updateWindowTitle()
+                    RunGuard.shared.arm()
                 }
             } catch {
-                NSLog("Renderer start failed: \(error.localizedDescription)")
+                PipelineLog.shared.event("session", "start failed: \(error.localizedDescription)")
                 await MainActor.run {
                     panel.setRunning(false)
+                    self.menuBar.setRunning(false)
                     panel.setStatus("Start failed", isError: true)
                     self.overlayController.setCaptureError("Start failed: \(error.localizedDescription)")
                     self.overlayController.hide()
@@ -573,12 +606,14 @@ extension MainViewController: ControlPanelViewDelegate {
     }
 
     func controlPanelDidPressStop(_ panel: ControlPanelView) {
+        RunGuard.shared.disarm()
         panel.setStatus("Stopping...")
 
         Task { [weak self] in
             await self?.renderer.stop()
             await MainActor.run {
                 panel.setRunning(false)
+                self?.menuBar.setRunning(false)
                 panel.setStatus("Stopped")
                 self?.overlayController.hide()
                 self?.updateWindowTitle()
@@ -620,14 +655,8 @@ extension MainViewController: ControlPanelViewDelegate {
         updateCaptureConfiguration { config in
             config.framesPerSecond = fps
         }
-        updateRenderSettings(syncUI: true) { settings in
-            guard settings.frameGenerationEnabled else { return }
-            let multiplier = settings.frameGenerationMode == .x2 ? 2 : 3
-            let minimumTarget = max(60, fps * multiplier)
-            if settings.targetPresentationFPS < minimumTarget {
-                settings.targetPresentationFPS = minimumTarget
-            }
-        }
+        alignOutputTarget(syncUI: true)
+        panel.setStatus(outputTargetStatus())
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeQueueDepth depth: Int) {
@@ -652,7 +681,20 @@ extension MainViewController: ControlPanelViewDelegate {
 
     func controlPanelDidRequestSettings(_ panel: ControlPanelView) {
         let settingsVC = SettingsViewController(settingsStore: settingsStore)
-        presentAsSheet(settingsVC)
+        settingsVC.onShortcutChanged = { [weak self] in
+            self?.refreshSafetyHint()
+        }
+        presentTransientSheet(settingsVC)
+    }
+
+    func controlPanelDidRequestMonitor(_ panel: ControlPanelView) {
+        guard presentedViewControllers?.isEmpty != false else { return }
+        presentTransientSheet(MonitorViewController())
+    }
+
+    func controlPanelDidRequestGuide(_ panel: ControlPanelView) {
+        guard presentedViewControllers?.isEmpty != false else { return }
+        presentTransientSheet(GuideViewController())
     }
 
 
@@ -702,30 +744,30 @@ extension MainViewController: ControlPanelViewDelegate {
         }
     }
 
-    func controlPanel(_ panel: ControlPanelView, didChangeTargetPresentationFPS fps: Int) {
-        updateRenderSettings { settings in
-            settings.targetPresentationFPS = fps
-        }
-        panel.setStatus("Target FPS: \(fps)")
-    }
-
     func controlPanel(_ panel: ControlPanelView, didToggleFrameGeneration enabled: Bool) {
         updateRenderSettings(syncUI: true) { settings in
             settings.frameGenerationEnabled = enabled
-            guard enabled else { return }
-            let multiplier = settings.frameGenerationMode == .x2 ? 2 : 3
-            let minimumTarget = max(60, captureConfiguration.framesPerSecond * multiplier)
-            if settings.targetPresentationFPS < minimumTarget {
-                settings.targetPresentationFPS = minimumTarget
-            }
+            let capture = max(self.captureConfiguration.framesPerSecond, 1)
+            settings.targetPresentationFPS = enabled ? capture * settings.frameGenerationMode.multiplier : capture
         }
-        panel.setStatus(enabled ? "Frame Generation: On" : "Frame Generation: Off")
+        panel.setStatus(outputTargetStatus())
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didToggleHUD visible: Bool) {
+        UserDefaults.standard.set(visible, forKey: Self.showHUDKey)
+        overlayController.setHUDVisible(visible, animated: true)
+        PipelineLog.shared.event("ui", "stats overlay \(visible ? "shown" : "hidden")")
+        panel.setStatus(visible ? "Stats overlay: On" : "Stats overlay: Off")
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationMode mode: FrameGenerationMode) {
-        settingsStore.frameGenerationMode = mode
-        updateWindowTitle()
-        panel.setStatus("FG Mode: \(mode.rawValue)")
+        updateRenderSettings(syncUI: false) { settings in
+            settings.frameGenerationMode = mode
+            settings.frameGenerationEnabled = true
+            let capture = max(self.captureConfiguration.framesPerSecond, 1)
+            settings.targetPresentationFPS = capture * mode.multiplier
+        }
+        panel.setStatus(outputTargetStatus())
     }
 
 
@@ -733,6 +775,13 @@ extension MainViewController: ControlPanelViewDelegate {
         profileManager.selectProfile(id: id)
         controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
         applyProfile(profileManager.activeProfile)
+    }
+
+    /// Settings, the stop-shortcut prompt, Monitor and the guide close when the click
+    /// lands on the window around the sheet.
+    private func presentTransientSheet(_ controller: NSViewController) {
+        presentAsSheet(controller)
+        outsideClickDismisser.start(controller)
     }
 
     func controlPanelDidRequestAddProfile(_ panel: ControlPanelView) {
@@ -751,7 +800,7 @@ extension MainViewController: ControlPanelViewDelegate {
     }
 
     func controlPanel(_ panel: ControlPanelView, didRequestDuplicateProfile id: UUID) {
-        let profile = profileManager.activeProfile
+        guard let profile = profileManager.profiles.first(where: { $0.id == id }) else { return }
         let new = profileManager.duplicateProfile(profile)
         profileManager.selectProfile(id: new.id)
         controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
