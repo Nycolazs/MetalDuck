@@ -1,38 +1,23 @@
 import AppKit
 
-/// Monitor as a sheet of the main window, the same way Settings is attached to it.
-@MainActor
-final class MonitorViewController: NSViewController {
-    private let monitor = MonitorView()
-
-    override func loadView() {
-        monitor.onClose = { [weak self] in
-            self?.dismiss(nil)
-        }
-        view = monitor
-        preferredContentSize = NSSize(width: MonitorView.width, height: MonitorView.height)
-    }
-}
-
-// MARK: - Root view
-
+/// Live charts, load and the event log, shown as a page of the main window in
+/// the space the controls use. It only listens for updates while it is showing.
 @MainActor
 final class MonitorView: NSView {
-    static let width: CGFloat = 1000
-    static let height: CGFloat = 590
-    var onClose: (() -> Void)?
+    /// The current verdict as one sentence, for the page header.
+    var onVerdictChange: ((String) -> Void)?
+    /// Card groups in reading order, for the entrance stagger.
+    private(set) var rows: [NSView] = []
+    private(set) var isActive = false
+    private(set) var verdictSentence = ""
 
     private static let historyLength = 90
 
-    private let titleLabel = GlassLabel.make("Monitor", font: GlassFont.largeTitle)
     private let verdictBadge = VerdictBadge()
-    private let verdictLabel = GlassLabel.make(" ", font: GlassFont.body, color: .secondaryLabelColor)
-
-    private let saveSwitch = NSSwitch()
+    private let saveSwitch = GlassSwitch()
     private let diskLabel = GlassLabel.make(" ", font: GlassFont.caption, color: .tertiaryLabelColor)
-    private lazy var revealButton = GlassActionButton(title: nil, symbol: "folder", style: .neutral, height: 28)
-    private lazy var deleteButton = GlassActionButton(title: nil, symbol: "trash", style: .neutral, height: 28)
-    private lazy var doneButton = GlassActionButton(title: "Done", symbol: "checkmark", style: .accent, symbolSize: 11, height: 28)
+    private lazy var revealButton = GlassActionButton(title: nil, symbol: "folder", style: .neutral, symbolSize: 11, height: 26)
+    private lazy var deleteButton = GlassActionButton(title: nil, symbol: "trash", style: .neutral, symbolSize: 11, height: 26)
 
     private let captureCard = StatCard(title: "Capture", symbol: "camera.viewfinder", unit: "fps", color: .systemBlue)
     private let outputCard = StatCard(title: "Output", symbol: "display", unit: "fps", color: .systemGreen)
@@ -51,7 +36,7 @@ final class MonitorView: NSView {
     private let lagFact = FactView(title: "Flow lag", symbol: "arrow.triangle.2.circlepath")
     private let dropsFact = FactView(title: "Capture drops", symbol: "exclamationmark.triangle")
     private let drawMaxFact = FactView(title: "Slowest draw", symbol: "tortoise")
-    private let healthLabel = NSTextField(wrappingLabelWithString: " ")
+    private let healthLabel = GlassLabel.make(" ", font: GlassFont.body, color: .secondaryLabelColor)
 
     private let feed = LogFeedView()
 
@@ -60,32 +45,11 @@ final class MonitorView: NSView {
     private var lastLiveUpdate = Date.distantPast
     private var observers: [NSObjectProtocol] = []
     private var idleTimer: Timer?
-    private var cards: [NSView] = []
-    private var didReveal = false
 
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
         buildLayout()
-
-        stats = Array(PipelineLog.shared.recentStats().suffix(Self.historyLength))
-        loads = stats.map(\.load)
-        if let last = stats.last, Date().timeIntervalSince(last.date) < 2.5 {
-            lastLiveUpdate = last.date
-        }
-        if loads.isEmpty {
-            loads = [PipelineLog.shared.currentLoad()]
-        }
-        refresh(animated: false)
-        refreshDiskUsage()
-
-        let center = NotificationCenter.default
-        observers.append(center.addObserver(forName: .pipelineLiveStats, object: nil, queue: .main) { [weak self] note in
-            guard let live = note.object as? PipelineLiveStats else { return }
-            MainActor.assumeIsolated { self?.append(live) }
-        })
-        idleTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.sampleIdle() }
-        }
     }
 
     @available(*, unavailable)
@@ -93,121 +57,69 @@ final class MonitorView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard window != nil, !didReveal else { return }
-        didReveal = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            GlassMotion.reveal(self.cards, delayStep: 0.04)
+    /// Showing the page loads the session so far and starts listening;
+    /// hiding it stops every update, so a hidden page costs nothing.
+    func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        if active {
+            reloadHistory()
+            refresh(animated: false)
+            refreshDiskUsage()
+            startObserving()
+        } else {
+            stopObserving()
         }
+        feed.setActive(active)
     }
 
     // MARK: Layout
 
     private func buildLayout() {
-        widthAnchor.constraint(equalToConstant: Self.width).isActive = true
-        heightAnchor.constraint(equalToConstant: Self.height).isActive = true
-
-        let header = makeHeader()
-        let stack = NSStackView()
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = GlassMetrics.columnSpacing
-
         let kpis = row([captureCard, outputCard, generatedCard, frameTimeCard])
         let charts = row([
             card("Frame rate", symbol: "waveform.path.ecg", legend: [("Capture", .systemBlue), ("Output", .systemGreen), ("Generated", .systemPurple)], content: fpsChart),
             makeLoadCard()
         ], ratios: [2, 1])
-        let details = row([
-            card("Output frames", symbol: "square.stack.3d.up", legend: [], content: makeMixContent()),
-            card("Pipeline health", symbol: "stethoscope", legend: [], content: makeHealthContent())
-        ])
-        let log = card("Event log", symbol: "list.bullet.rectangle", legend: [], accessory: feed.filterControl, content: feed)
-        cards = [kpis, charts, details, log]
+        let health = card("Pipeline health", symbol: "stethoscope", legend: [], accessory: verdictBadge, content: makeHealthContent())
+        let mix = card("Output frames", symbol: "square.stack.3d.up", legend: [], content: makeMixContent())
+        let log = card("Event log", symbol: "list.bullet.rectangle", legend: [], accessory: feed.filterControl, content: makeLogContent())
 
-        for view in cards {
-            stack.addArrangedSubview(view)
+        let leftColumn = NSStackView(views: [health, mix])
+        leftColumn.translatesAutoresizingMaskIntoConstraints = false
+        leftColumn.orientation = .vertical
+        leftColumn.distribution = .fillEqually
+        leftColumn.spacing = 14
+        for view in leftColumn.arrangedSubviews {
+            view.leadingAnchor.constraint(equalTo: leftColumn.leadingAnchor).isActive = true
+            view.trailingAnchor.constraint(equalTo: leftColumn.trailingAnchor).isActive = true
+        }
+        let details = row([leftColumn, log])
+        rows = [kpis, charts, health, log, mix]
+
+        let stack = NSStackView(views: [kpis, charts, details])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = GlassMetrics.columnSpacing
+        for view in stack.arrangedSubviews {
             view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
             view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
         }
-        log.setContentHuggingPriority(.init(1), for: .vertical)
-
-        addSubview(header)
+        details.setContentHuggingPriority(.init(1), for: .vertical)
         addSubview(stack)
-        let inset: CGFloat = 18
+        pin(stack, to: self)
+
+        // The controls decide the page height; the bottom row takes what is left.
+        let chartsHeight = charts.heightAnchor.constraint(equalToConstant: 160)
+        chartsHeight.priority = .init(999)
+        let detailsMinimum = details.heightAnchor.constraint(greaterThanOrEqualToConstant: 220)
+        detailsMinimum.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            header.topAnchor.constraint(equalTo: topAnchor, constant: 16),
-            header.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
-            header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
-
-            stack.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14),
-
-            kpis.heightAnchor.constraint(equalToConstant: 96),
-            charts.heightAnchor.constraint(equalToConstant: 168),
-            details.heightAnchor.constraint(equalToConstant: 124),
-            log.heightAnchor.constraint(greaterThanOrEqualToConstant: 110)
+            kpis.heightAnchor.constraint(equalToConstant: 88),
+            chartsHeight,
+            detailsMinimum
         ])
-    }
-
-    private func makeHeader() -> NSView {
-        let titleRow = NSStackView(views: [titleLabel, verdictBadge])
-        titleRow.orientation = .horizontal
-        titleRow.alignment = .centerY
-        titleRow.spacing = 10
-
-        verdictLabel.lineBreakMode = .byTruncatingTail
-        verdictLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let titles = NSStackView(views: [titleRow, verdictLabel])
-        titles.orientation = .vertical
-        titles.alignment = .leading
-        titles.spacing = 4
-        titles.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        saveSwitch.controlSize = .small
-        saveSwitch.state = PipelineLog.shared.isSavingToFile ? .on : .off
-        saveSwitch.target = self
-        saveSwitch.action = #selector(handleSaveToggle)
-        let saveLabel = GlassLabel.make("Save log files", font: GlassFont.body)
-        saveLabel.toolTip = "Write every event and per-second summary to ~/Library/Logs/MetalDuck. The in-app log works either way."
-        let saveText = NSStackView(views: [saveLabel, diskLabel])
-        saveText.orientation = .vertical
-        saveText.alignment = .trailing
-        saveText.spacing = 1
-
-        revealButton.toolTip = "Show log files in Finder"
-        revealButton.target = self
-        revealButton.action = #selector(handleReveal)
-        deleteButton.toolTip = "Delete saved log files"
-        deleteButton.target = self
-        deleteButton.action = #selector(handleDelete)
-        doneButton.target = self
-        doneButton.action = #selector(handleDone)
-        doneButton.setContentHuggingPriority(.required, for: .horizontal)
-        doneButton.widthAnchor.constraint(equalToConstant: 108).isActive = true
-
-        let fileControls = NSStackView(views: [saveText, saveSwitch, revealButton, deleteButton, doneButton])
-        fileControls.orientation = .horizontal
-        fileControls.alignment = .centerY
-        fileControls.spacing = 10
-        fileControls.setCustomSpacing(14, after: saveSwitch)
-        fileControls.setCustomSpacing(6, after: revealButton)
-        fileControls.setCustomSpacing(14, after: deleteButton)
-
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let header = NSStackView(views: [titles, spacer, fileControls])
-        header.translatesAutoresizingMaskIntoConstraints = false
-        header.distribution = .fill
-        header.orientation = .horizontal
-        header.alignment = .centerY
-        header.spacing = 24
-        return header
     }
 
     private func row(_ views: [NSView], ratios: [CGFloat]? = nil) -> NSView {
@@ -311,22 +223,19 @@ final class MonitorView: NSView {
     }
 
     private func makeHealthContent() -> NSView {
-        healthLabel.font = GlassFont.body
-        healthLabel.textColor = .secondaryLabelColor
-        healthLabel.maximumNumberOfLines = 2
-        healthLabel.lineBreakMode = .byTruncatingTail
         healthLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        healthLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let facts = NSStackView(views: [busyFact, lagFact, dropsFact, drawMaxFact])
         facts.orientation = .horizontal
         facts.distribution = .fillEqually
         facts.spacing = 12
 
-        let content = NSStackView(views: [healthLabel, NSView(), facts])
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .vertical)
+        let content = NSStackView(views: [healthLabel, spacer, facts])
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 8
+        content.spacing = 4
         for view in content.arrangedSubviews {
             view.leadingAnchor.constraint(equalTo: content.leadingAnchor).isActive = true
             view.trailingAnchor.constraint(equalTo: content.trailingAnchor).isActive = true
@@ -334,10 +243,81 @@ final class MonitorView: NSView {
         return content
     }
 
+    /// The log fills the card; saving to disk sits along its bottom edge.
+    private func makeLogContent() -> NSView {
+        let saveHelp = "Write every event and per-second summary to ~/Library/Logs/MetalDuck. The in-app log works either way."
+        saveSwitch.isOn = PipelineLog.shared.isSavingToFile
+        saveSwitch.target = self
+        saveSwitch.action = #selector(handleSaveToggle)
+        saveSwitch.toolTip = saveHelp
+        let saveLabel = GlassLabel.make("Save log files", font: GlassFont.caption, color: .secondaryLabelColor)
+        saveLabel.toolTip = saveHelp
+        diskLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        revealButton.toolTip = "Show log files in Finder"
+        revealButton.setAccessibilityLabel("Show log files in Finder")
+        revealButton.target = self
+        revealButton.action = #selector(handleReveal)
+        deleteButton.toolTip = "Delete saved log files"
+        deleteButton.setAccessibilityLabel("Delete saved log files")
+        deleteButton.target = self
+        deleteButton.action = #selector(handleDelete)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let footer = NSStackView(views: [saveSwitch, saveLabel, diskLabel, spacer, revealButton, deleteButton])
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.spacing = 8
+        footer.setCustomSpacing(4, after: revealButton)
+        footer.heightAnchor.constraint(equalToConstant: 26).isActive = true
+
+        let content = NSStackView(views: [feed, SeparatorLine(), footer])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 8
+        for view in content.arrangedSubviews {
+            view.leadingAnchor.constraint(equalTo: content.leadingAnchor).isActive = true
+            view.trailingAnchor.constraint(equalTo: content.trailingAnchor).isActive = true
+        }
+        feed.setContentHuggingPriority(.init(1), for: .vertical)
+        feed.setContentCompressionResistancePriority(.init(1), for: .vertical)
+        return content
+    }
+
     // MARK: Data
 
     private var isLive: Bool {
         Date().timeIntervalSince(lastLiveUpdate) < 2.5
+    }
+
+    private func reloadHistory() {
+        stats = Array(PipelineLog.shared.recentStats().suffix(Self.historyLength))
+        loads = stats.map(\.load)
+        lastLiveUpdate = stats.last?.date ?? .distantPast
+        if loads.isEmpty {
+            loads = [PipelineLog.shared.currentLoad()]
+        }
+    }
+
+    private func startObserving() {
+        observers.append(NotificationCenter.default.addObserver(forName: .pipelineLiveStats, object: nil, queue: .main) { [weak self] note in
+            guard let live = note.object as? PipelineLiveStats else { return }
+            MainActor.assumeIsolated { self?.append(live) }
+        })
+        let timer = Timer(timeInterval: 1.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sampleIdle() }
+        }
+        timer.tolerance = 0.3
+        RunLoop.main.add(timer, forMode: .common)
+        idleTimer = timer
+    }
+
+    private func stopObserving() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+        idleTimer?.invalidate()
+        idleTimer = nil
     }
 
     private func append(_ live: PipelineLiveStats) {
@@ -426,14 +406,21 @@ final class MonitorView: NSView {
             verdictBadge.set(VerdictBadge.Kind(verdictPrefix: parts.first ?? ""))
             let detail = parts.count > 1 ? parts.dropFirst().joined(separator: " — ") : latest.verdict
             let sentence = detail.prefix(1).uppercased() + detail.dropFirst()
-            GlassMotion.crossfade(verdictLabel, to: sentence)
             GlassMotion.crossfade(healthLabel, to: sentence)
-            verdictLabel.toolTip = latest.verdict
+            healthLabel.toolTip = latest.verdict
+            publishVerdict(sentence)
         } else {
             verdictBadge.set(.idle)
-            GlassMotion.crossfade(verdictLabel, to: "Idle. Start scaling in the main window to see live numbers.")
             GlassMotion.crossfade(healthLabel, to: "Nothing is running. The last session stays on the charts.")
+            healthLabel.toolTip = nil
+            publishVerdict("Idle. Press Start to see live numbers.")
         }
+    }
+
+    private func publishVerdict(_ sentence: String) {
+        guard sentence != verdictSentence else { return }
+        verdictSentence = sentence
+        onVerdictChange?(sentence)
     }
 
     private func refreshDiskUsage() {
@@ -446,7 +433,7 @@ final class MonitorView: NSView {
     // MARK: Actions
 
     @objc private func handleSaveToggle() {
-        PipelineLog.shared.isSavingToFile = saveSwitch.state == .on
+        PipelineLog.shared.isSavingToFile = saveSwitch.isOn
         refreshDiskUsage()
     }
 
@@ -457,10 +444,6 @@ final class MonitorView: NSView {
             try? FileManager.default.createDirectory(at: PipelineLog.directory, withIntermediateDirectories: true)
             NSWorkspace.shared.open(PipelineLog.directory)
         }
-    }
-
-    @objc private func handleDone() {
-        onClose?()
     }
 
     @objc private func handleDelete() {
@@ -794,7 +777,8 @@ final class LineChartView: AppearanceLayerView {
 
         let hasData = series.contains { $0.values.count > 1 }
         topLabel.isHidden = isCompact || !hasData
-        midLabel.isHidden = isCompact || !hasData
+        // A short chart has no room for a middle label; it would sit on the top one.
+        midLabel.isHidden = isCompact || !hasData || bounds.height < 44
         emptyLabel.isHidden = isCompact || hasData
         topLabel.stringValue = valueFormatter(maximum)
         midLabel.stringValue = valueFormatter(maximum / 2)
@@ -1104,6 +1088,13 @@ private final class LogFeedView: NSView {
     private let scrollView = NSScrollView()
     private var observer: NSObjectProtocol?
     private var pendingReload = false
+    private var lastShown: Shown?
+
+    private struct Shown: Equatable {
+        var filter: Int
+        var count: Int
+        var newest: Date?
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1116,6 +1107,15 @@ private final class LogFeedView: NSView {
         filterControl.widthAnchor.constraint(equalToConstant: 216).isActive = true
 
         textView.isEditable = false
+        // A read-only log: no spell checking, data detection or substitutions. The
+        // first text check would load the spell checker in the middle of a page switch.
+        textView.enabledTextCheckingTypes = 0
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
         textView.isSelectable = true
         textView.drawsBackground = false
         textView.textContainerInset = NSSize(width: 0, height: 2)
@@ -1129,10 +1129,20 @@ private final class LogFeedView: NSView {
         scrollView.documentView = textView
         addSubview(scrollView)
         pin(scrollView, to: self)
+    }
 
-        reload()
-        observer = NotificationCenter.default.addObserver(forName: .pipelineLogLine, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.scheduleReload() }
+    /// Listens for new lines only while the Monitor page is showing.
+    func setActive(_ active: Bool) {
+        if active {
+            guard observer == nil else { return }
+            reload()
+            scrollToEnd()
+            observer = NotificationCenter.default.addObserver(forName: .pipelineLogLine, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleReload() }
+            }
+        } else if let observer {
+            NotificationCenter.default.removeObserver(observer)
+            self.observer = nil
         }
     }
 
@@ -1148,6 +1158,7 @@ private final class LogFeedView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self else { return }
             self.pendingReload = false
+            guard self.observer != nil else { return }
             self.reload()
         }
     }
@@ -1163,6 +1174,11 @@ private final class LogFeedView: NSView {
                 }
             }
             .suffix(300)
+
+        // Same filter and same newest line: the text on screen is already right.
+        let shown = Shown(filter: filter, count: lines.count, newest: lines.last?.date)
+        guard shown != lastShown else { return }
+        lastShown = shown
 
         let clip = scrollView.contentView
         let atBottom = clip.bounds.maxY >= textView.frame.height - 24
@@ -1198,8 +1214,14 @@ private final class LogFeedView: NSView {
         }
         textView.textStorage?.setAttributedString(text)
         if atBottom || lines.count < 12 {
-            textView.scrollToEndOfDocument(nil)
+            scrollToEnd()
         }
+    }
+
+    /// Jumps to the newest line. `scrollToEndOfDocument` animates the scroll on the
+    /// main thread, which is wasted on a log that updates while you watch it.
+    private func scrollToEnd() {
+        textView.scrollRangeToVisible(NSRange(location: (textView.string as NSString).length, length: 0))
     }
 
     private static let timeFormatter: DateFormatter = {
@@ -1237,6 +1259,6 @@ private final class LogFeedView: NSView {
 
     @objc private func handleFilterChanged() {
         reload()
-        textView.scrollToEndOfDocument(nil)
+        scrollToEnd()
     }
 }

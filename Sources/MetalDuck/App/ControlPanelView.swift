@@ -58,7 +58,6 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID)
     func controlPanelDidRequestAddProfile(_ panel: ControlPanelView)
     func controlPanelDidRequestSettings(_ panel: ControlPanelView)
-    func controlPanelDidRequestMonitor(_ panel: ControlPanelView)
     func controlPanelDidRequestGuide(_ panel: ControlPanelView)
     func controlPanel(_ panel: ControlPanelView, didRequestRenameProfile id: UUID)
     func controlPanel(_ panel: ControlPanelView, didRequestDuplicateProfile id: UUID)
@@ -67,10 +66,25 @@ protocol ControlPanelViewDelegate: AnyObject {
 
 @MainActor
 final class ControlPanelView: NSView {
+    /// The two pages that share the area under the header.
+    enum Page {
+        case controls
+        case monitor
+    }
+
     weak var delegate: ControlPanelViewDelegate?
+    private(set) var page: Page = .controls
 
     private var isApplyingValues = false
     private var isRunning = false
+
+    // Pages
+    private let controlsPage = NSView()
+    private var monitorPage: MonitorView?
+    private weak var monitorRow: SidebarRow?
+    private weak var sessionCard: NSView?
+    private var profileName = "Profile"
+    private var summaryText = " "
 
     // Header
     private let profileTitleLabel = GlassLabel.make("Profile", font: GlassFont.largeTitle)
@@ -147,6 +161,9 @@ final class ControlPanelView: NSView {
     )
     private weak var sidebarView: NSView?
     private var sidebarMark: SidebarMark?
+    private var profileRows: [UUID: SidebarRow] = [:]
+    private var profileSignature: [String] = []
+    private var activeProfileID: UUID?
     private weak var hoveredSidebarRow: SidebarRow?
     private var sidebarWidthConstraint: NSLayoutConstraint?
     private var footerRows: [SidebarRow] = []
@@ -168,23 +185,29 @@ final class ControlPanelView: NSView {
 
     // MARK: - Public API
 
+    /// Shows a profile's values. Called when a profile is picked, created or renamed,
+    /// not while a control is being dragged, so the numbers cross-fade. Sliders jump:
+    /// AppKit animates their values on the main thread, which cost more than it showed.
     func apply(settings: RenderSettings, capture: CaptureConfiguration, profileName: String) {
         isApplyingValues = true
 
-        GlassMotion.crossfade(profileTitleLabel, to: profileName, duration: 0.3)
+        self.profileName = profileName
+        if page == .controls {
+            GlassMotion.crossfade(profileTitleLabel, to: profileName, duration: 0.3)
+        }
         upscalerDropdown.selectItem(withTitle: settings.upscalingAlgorithm.rawValue)
         outputScaleSlider.floatValue = settings.outputScale
-        outputScaleValueLabel.stringValue = String(format: "%.2f×", settings.outputScale)
+        GlassMotion.crossfade(outputScaleValueLabel, to: String(format: "%.2f×", settings.outputScale))
         matchOutputResolutionSwitch.isOn = settings.matchOutputResolution
         samplingControl.selectedSegment = SamplingMode.allCases.firstIndex(of: settings.samplingMode) ?? 0
         sharpnessSlider.floatValue = settings.sharpness
-        sharpnessValueLabel.stringValue = String(format: "%.2f", settings.sharpness)
+        GlassMotion.crossfade(sharpnessValueLabel, to: String(format: "%.2f", settings.sharpness))
 
         dynamicResolutionSwitch.isOn = settings.dynamicResolutionEnabled
         dynamicMinSlider.floatValue = settings.dynamicScaleMinimum
         dynamicMaxSlider.floatValue = settings.dynamicScaleMaximum
-        dynamicMinValueLabel.stringValue = String(format: "%.2f", settings.dynamicScaleMinimum)
-        dynamicMaxValueLabel.stringValue = String(format: "%.2f", settings.dynamicScaleMaximum)
+        GlassMotion.crossfade(dynamicMinValueLabel, to: String(format: "%.2f", settings.dynamicScaleMinimum))
+        GlassMotion.crossfade(dynamicMaxValueLabel, to: String(format: "%.2f", settings.dynamicScaleMaximum))
         applyOutputTarget(captureFPS: capture.framesPerSecond, settings: settings)
 
         if settings.frameGenerationEnabled,
@@ -196,13 +219,85 @@ final class ControlPanelView: NSView {
 
         captureCursorSwitch.isOn = capture.showsCursor
         captureFPSSlider.integerValue = capture.framesPerSecond
-        captureFPSValueLabel.stringValue = "\(capture.framesPerSecond) fps"
+        GlassMotion.crossfade(captureFPSValueLabel, to: "\(capture.framesPerSecond) fps")
         queueDepthSlider.integerValue = capture.queueDepth
-        queueDepthValueLabel.stringValue = "\(capture.queueDepth)"
+        GlassMotion.crossfade(queueDepthValueLabel, to: "\(capture.queueDepth)")
 
         syncDependentControls()
         refreshSummary()
         isApplyingValues = false
+    }
+
+    /// Updates the output equation and the summary line, and nothing else. Used while
+    /// the capture rate or the multiplier changes, where a full `apply` is wasted work.
+    func refreshOutputTarget(captureFPS: Int, settings: RenderSettings) {
+        applyOutputTarget(captureFPS: captureFPS, settings: settings)
+        refreshSummary()
+    }
+
+    /// Controls and Monitor share the area under the header. Switching cross-fades
+    /// the two on Core Animation; the Monitor only updates while it is showing.
+    func showPage(_ newPage: Page, animated: Bool = true) {
+        guard newPage != page else { return }
+        let monitor = ensureMonitorPage()
+        let outgoing: NSView = page == .controls ? controlsPage : monitor
+        let incoming: NSView = newPage == .controls ? controlsPage : monitor
+        page = newPage
+        monitorRow?.isSelected = newPage == .monitor
+        if newPage == .controls {
+            monitor.setActive(false)
+        }
+        updateHeaderForPage(animated: animated)
+        let stagger = newPage == .monitor ? monitor.rows : ([sessionCard].compactMap { $0 } + revealViews)
+        GlassMotion.transition(from: outgoing, to: incoming, stagger: stagger, animated: animated && window != nil)
+        guard newPage == .monitor else { return }
+        guard animated else {
+            monitor.setActive(true)
+            return
+        }
+        // Let the switch start first; loading the history and the log takes a few
+        // milliseconds, and the page is still nearly transparent when it lands.
+        DispatchQueue.main.async { [weak self, weak monitor] in
+            guard let self, let monitor, self.page == .monitor else { return }
+            monitor.setActive(true)
+        }
+    }
+
+    private func updateHeaderForPage(animated: Bool) {
+        let duration: CFTimeInterval = animated ? 0.25 : 0
+        switch page {
+        case .controls:
+            GlassMotion.crossfade(profileTitleLabel, to: profileName, duration: duration)
+            GlassMotion.crossfade(profileSummaryLabel, to: summaryText, duration: duration)
+            profileSummaryLabel.toolTip = nil
+        case .monitor:
+            let verdict = monitorPage?.verdictSentence ?? " "
+            GlassMotion.crossfade(profileTitleLabel, to: "Monitor", duration: duration)
+            GlassMotion.crossfade(profileSummaryLabel, to: verdict, duration: duration)
+            profileSummaryLabel.toolTip = verdict
+        }
+    }
+
+    /// Built once, shortly after launch, so the first switch does not pay for it.
+    @discardableResult
+    private func ensureMonitorPage() -> MonitorView {
+        if let monitorPage { return monitorPage }
+        let monitor = MonitorView()
+        monitor.isHidden = true
+        monitor.onVerdictChange = { [weak self] sentence in
+            guard let self, self.page == .monitor else { return }
+            GlassMotion.crossfade(self.profileSummaryLabel, to: sentence)
+            self.profileSummaryLabel.toolTip = sentence
+        }
+        addSubview(monitor, positioned: .above, relativeTo: controlsPage)
+        NSLayoutConstraint.activate([
+            monitor.leadingAnchor.constraint(equalTo: controlsPage.leadingAnchor),
+            monitor.trailingAnchor.constraint(equalTo: controlsPage.trailingAnchor),
+            monitor.topAnchor.constraint(equalTo: controlsPage.topAnchor),
+            monitor.bottomAnchor.constraint(equalTo: controlsPage.bottomAnchor)
+        ])
+        monitorPage = monitor
+        return monitor
     }
 
     func setCaptureMode(_ mode: CaptureModeChoice) {
@@ -273,6 +368,19 @@ final class ControlPanelView: NSView {
     }
 
     func setProfiles(_ profiles: [Profile], activeId: UUID) {
+        activeProfileID = activeId
+        // Picking a profile does not change the list, so move the selection
+        // instead of rebuilding every row and its menu.
+        let signature = profiles.map { "\($0.id.uuidString)|\($0.name)|\($0.symbolName)|\($0.isBuiltIn)" }
+        if signature == profileSignature {
+            for (id, row) in profileRows {
+                row.isSelected = id == activeId
+            }
+            profileList.select(profileRows[activeId], animated: true)
+            return
+        }
+        profileSignature = signature
+        profileRows.removeAll()
         profileListStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let presets = profiles.filter(\.isBuiltIn)
@@ -288,7 +396,7 @@ final class ControlPanelView: NSView {
         }
         if custom.isEmpty {
             customEmptyLabel.isHidden = !isSidebarExpanded
-            addToProfileList(customEmptyLabel, inset: 10)
+            addToProfileList(customEmptyLabel, inset: 10, pinsTrailing: false)
         } else {
             custom.forEach { addToProfileList(makeProfileRow($0, activeId: activeId)) }
         }
@@ -390,12 +498,16 @@ final class ControlPanelView: NSView {
         let sections = makeSections()
         let mark = SidebarMark()
         sidebarMark = mark
+        sessionCard = session
+
+        controlsPage.translatesAutoresizingMaskIntoConstraints = false
+        controlsPage.addSubview(session)
+        controlsPage.addSubview(sections)
 
         addSubview(sidebar)
         addSubview(header)
         addSubview(mark)
-        addSubview(session)
-        addSubview(sections)
+        addSubview(controlsPage)
 
         let inset = GlassMetrics.windowInset
         let content = GlassMetrics.contentInset
@@ -410,11 +522,13 @@ final class ControlPanelView: NSView {
         ))
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
-            // Share the card column's top and bottom, so the rail is not taller than the panels.
-            sidebar.topAnchor.constraint(equalTo: session.topAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: sections.bottomAnchor),
+            // Share the page's top and bottom, so the rail is not taller than the panels.
+            sidebar.topAnchor.constraint(equalTo: controlsPage.topAnchor),
+            sidebar.bottomAnchor.constraint(equalTo: controlsPage.bottomAnchor),
             sidebarWidth,
 
+            // Opening the rail pushes the header and both pages to the right,
+            // so nothing is ever covered.
             header.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: content),
             header.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -content),
             header.topAnchor.constraint(equalTo: topAnchor, constant: 28),
@@ -424,16 +538,21 @@ final class ControlPanelView: NSView {
             mark.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             mark.centerYAnchor.constraint(equalTo: profileTitleLabel.centerYAnchor, constant: 2),
 
-            session.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            session.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            session.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16),
-
-            sections.leadingAnchor.constraint(equalTo: header.leadingAnchor),
-            sections.trailingAnchor.constraint(equalTo: header.trailingAnchor),
-            sections.topAnchor.constraint(equalTo: session.bottomAnchor, constant: GlassMetrics.sectionSpacing),
-            // The window height follows the content, so the cards always end
+            controlsPage.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            controlsPage.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            controlsPage.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16),
+            // The window height follows the controls, so the cards always end
             // level with the sidebar instead of leaving an empty band.
-            sections.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset)
+            controlsPage.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset),
+
+            session.leadingAnchor.constraint(equalTo: controlsPage.leadingAnchor),
+            session.trailingAnchor.constraint(equalTo: controlsPage.trailingAnchor),
+            session.topAnchor.constraint(equalTo: controlsPage.topAnchor),
+
+            sections.leadingAnchor.constraint(equalTo: controlsPage.leadingAnchor),
+            sections.trailingAnchor.constraint(equalTo: controlsPage.trailingAnchor),
+            sections.topAnchor.constraint(equalTo: session.bottomAnchor, constant: GlassMetrics.sectionSpacing),
+            sections.bottomAnchor.constraint(equalTo: controlsPage.bottomAnchor)
         ])
         applySidebarState(animated: false)
     }
@@ -509,17 +628,18 @@ final class ControlPanelView: NSView {
         applySidebarState(animated: !GlassMotion.reduceMotion && window != nil)
     }
 
-    /// Collapsed shows icons only; expanding widens the sidebar and pushes the content right.
+    /// Collapsed shows icons only; expanding widens the sidebar and pushes the
+    /// header and the current page (Controls or Monitor) to the right. Titles keep
+    /// their width and fade on Core Animation, so the per-frame work is the layout.
     private func applySidebarState(animated: Bool) {
         let expanded = isSidebarExpanded
         let width = expanded ? GlassMetrics.sidebarWidth : GlassMetrics.sidebarCollapsedWidth
         let rows = profileListStack.arrangedSubviews.compactMap { $0 as? SidebarRow } + footerRows
         let apply = { [self] in
+            sidebarWidthConstraint?.constant = width
             if animated {
-                sidebarWidthConstraint?.animator().constant = width
-                customEmptyLabel.animator().alphaValue = expanded ? 1 : 0
+                GlassMotion.fade(customEmptyLabel, to: expanded ? 1 : 0)
             } else {
-                sidebarWidthConstraint?.constant = width
                 customEmptyLabel.alphaValue = expanded ? 1 : 0
             }
             rows.forEach { $0.setTitleVisible(expanded, animated: animated) }
@@ -536,10 +656,13 @@ final class ControlPanelView: NSView {
             apply()
             return
         }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = expanded ? 0.34 : 0.28
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 1, 0.35, 1)
+        GlassMotion.animateLayout(
+            of: [self],
+            duration: expanded ? 0.34 : 0.28,
+            timing: CAMediaTimingFunction(controlPoints: 0.25, 1, 0.35, 1)
+        ) {
             apply()
+            layoutSubtreeIfNeeded()
         }
     }
 
@@ -573,15 +696,16 @@ final class ControlPanelView: NSView {
             self.delegate?.controlPanelDidRequestGuide(self)
         }
         let monitorRow = SidebarRow(title: "Monitor", symbol: "waveform.path.ecg.rectangle")
-        monitorRow.toolTip = "Live charts, load and the event log"
+        monitorRow.toolTip = "Live charts, load and the event log. Click again, or press Esc, to go back."
         monitorRow.onHover = { [weak monitorRow] in
             guard !GlassMotion.reduceMotion else { return }
             monitorRow?.icon.addSymbolEffect(.variableColor.iterative, options: .nonRepeating)
         }
         monitorRow.onClick = { [weak self] in
             guard let self else { return }
-            self.delegate?.controlPanelDidRequestMonitor(self)
+            self.showPage(self.page == .monitor ? .controls : .monitor)
         }
+        self.monitorRow = monitorRow
         let settingsRow = SidebarRow(title: "Settings", symbol: "gearshape")
         settingsRow.onHover = { [weak settingsRow] in
             guard !GlassMotion.reduceMotion else { return }
@@ -600,6 +724,9 @@ final class ControlPanelView: NSView {
         footer.spacing = 4
 
         let container = surface.contentView
+        // Titles keep their open-rail width; the rail clips them while it is narrow.
+        container.wantsLayer = true
+        container.layer?.masksToBounds = true
         container.addSubview(listScroll)
         container.addSubview(footer)
 
@@ -641,16 +768,25 @@ final class ControlPanelView: NSView {
         row.toolTip = profile.isBuiltIn ? "Built-in preset · right-click for more" : "Right-click to rename or delete"
         row.onClick = { [weak self] in
             guard let self else { return }
+            // From the Monitor, the active profile just leads back to its controls,
+            // without loading it again over any changes made since.
+            let returning = self.page == .monitor && profile.id == self.activeProfileID
+            self.showPage(.controls)
+            guard !returning else { return }
             self.delegate?.controlPanel(self, didSelectProfile: profile.id)
         }
         row.menu = makeProfileMenu(for: profile)
+        profileRows[profile.id] = row
         return row
     }
 
-    private func addToProfileList(_ view: NSView, inset: CGFloat = 0) {
+    /// `pinsTrailing: false` leaves a label at its own width, clipped by the rail.
+    private func addToProfileList(_ view: NSView, inset: CGFloat = 0, pinsTrailing: Bool = true) {
         profileListStack.addArrangedSubview(view)
         view.leadingAnchor.constraint(equalTo: profileListStack.leadingAnchor, constant: inset).isActive = true
-        view.trailingAnchor.constraint(equalTo: profileListStack.trailingAnchor).isActive = true
+        if pinsTrailing {
+            view.trailingAnchor.constraint(equalTo: profileListStack.trailingAnchor).isActive = true
+        }
     }
 
     private func makeHeader() -> NSView {
@@ -822,11 +958,7 @@ final class ControlPanelView: NSView {
         for view in show {
             view.isHidden = false
             if animated, !GlassMotion.reduceMotion {
-                view.alphaValue = 0
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.25
-                    view.animator().alphaValue = 1
-                }
+                GlassMotion.fade(view, from: 0, to: 1, duration: 0.25)
             }
         }
     }
@@ -869,6 +1001,12 @@ final class ControlPanelView: NSView {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             GlassMotion.reveal(self.revealViews, delayStep: 0.06)
+        }
+        // Build the Monitor once the entrance has played, so opening it is instant.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, self.monitorPage == nil else { return }
+            self.ensureMonitorPage()
+            self.layoutSubtreeIfNeeded()
         }
     }
 
@@ -949,7 +1087,10 @@ final class ControlPanelView: NSView {
         if resolvedTargetFPS > 0 {
             parts.append("\(resolvedTargetFPS) fps output")
         }
-        profileSummaryLabel.stringValue = parts.joined(separator: "  ·  ")
+        summaryText = parts.joined(separator: "  ·  ")
+        if page == .controls {
+            profileSummaryLabel.stringValue = summaryText
+        }
     }
 
     private func syncDependentControls() {
@@ -1111,7 +1252,7 @@ final class ControlPanelView: NSView {
 
 }
 
-/// Glass mark in the gap above the rail, left of the profile name.
+/// Glass mark in the gap above the rail, left of the page title.
 /// The name appears beside it only while the rail is open.
 final class SidebarMark: NSView {
     private let title = GlassLabel.make("MetalDuck", font: GlassFont.sidebarItem, color: .secondaryLabelColor)
@@ -1128,9 +1269,9 @@ final class SidebarMark: NSView {
         icon.image = MetalDuckIcon.glassMark()
         icon.setAccessibilityLabel("MetalDuck")
 
+        // Keeps its width and is clipped while the rail is narrow, like the row titles.
         title.alphaValue = 0
-        title.lineBreakMode = .byTruncatingTail
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        title.setContentCompressionResistancePriority(.init(999), for: .horizontal)
 
         addSubview(icon)
         addSubview(title)
@@ -1142,7 +1283,6 @@ final class SidebarMark: NSView {
             icon.widthAnchor.constraint(equalToConstant: 32),
             icon.heightAnchor.constraint(equalToConstant: 32),
             title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
-            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             title.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
     }
@@ -1157,7 +1297,7 @@ final class SidebarMark: NSView {
     func setExpanded(_ expanded: Bool, animated: Bool) {
         let alpha: CGFloat = expanded ? 1 : 0
         if animated {
-            title.animator().alphaValue = alpha
+            GlassMotion.fade(title, to: alpha)
         } else {
             title.alphaValue = alpha
         }
@@ -1179,7 +1319,10 @@ final class SidebarHeaderView: NSView {
         label = GlassLabel.sidebarHeader(title)
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // Keeps its open-rail width and is clipped when the rail is narrow, so
+        // the text is not redrawn on every frame of the rail's animation.
+        label.setContentCompressionResistancePriority(.init(999), for: .horizontal)
+        label.widthAnchor.constraint(lessThanOrEqualToConstant: SidebarRow.maximumTitleWidth).isActive = true
         wantsLayer = true
         layer?.masksToBounds = true
         addSubview(label)
@@ -1219,14 +1362,12 @@ final class SidebarHeaderView: NSView {
         // A title with nothing else under it is just a blank band once the words fade.
         // The new-profile header keeps a row so its + stays with the icons.
         let height: CGFloat = accessoryTrailing == nil ? (compact ? 0 : 28) : (compact ? 40 : 28)
+        accessoryTrailing?.constant = trailing
+        heightConstraint.constant = height
         if animated {
-            label.animator().alphaValue = alpha
-            accessoryTrailing?.animator().constant = trailing
-            heightConstraint.animator().constant = height
+            GlassMotion.fade(label, to: alpha)
         } else {
             label.alphaValue = alpha
-            accessoryTrailing?.constant = trailing
-            heightConstraint.constant = height
         }
     }
 }

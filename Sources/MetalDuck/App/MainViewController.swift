@@ -34,6 +34,8 @@ final class MainViewController: NSViewController {
     private var displayEntries: [CaptureEntry] = []
     private var windowEntries: [CaptureEntry] = []
     private var lastStatsUpdateTime: CFTimeInterval?
+    private var captureReconfiguration: Task<Void, Never>?
+    private var captureConfigurationPending = false
 
     init(
         context: MetalContext,
@@ -357,18 +359,24 @@ final class MainViewController: NSViewController {
         }
     }
 
+    /// A slider drag sends many changes. Only one reconfiguration runs at a time,
+    /// and when it finishes the latest values go out once, so the stream is not
+    /// rebuilt for every step of the drag.
     private func updateCaptureConfiguration(_ mutate: (inout CaptureConfiguration) -> Void) {
         mutate(&captureConfiguration)
+        captureConfigurationPending = true
+        guard captureReconfiguration == nil else { return }
 
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await renderer.reconfigureCapture(configuration: self.captureConfiguration)
-            } catch {
-                await MainActor.run {
+        captureReconfiguration = Task { [weak self] in
+            while let self, self.captureConfigurationPending {
+                self.captureConfigurationPending = false
+                do {
+                    try await self.renderer.reconfigureCapture(configuration: self.captureConfiguration)
+                } catch {
                     self.controlPanel.setStatus("Capture config failed", isError: true)
                 }
             }
+            self?.captureReconfiguration = nil
         }
     }
 
@@ -541,6 +549,8 @@ final class MainViewController: NSViewController {
             } else {
                 controlPanelDidPressStart(controlPanel)
             }
+        case "\u{1b}" where controlPanel.page == .monitor:
+            controlPanel.showPage(.controls)
         default:
             super.keyDown(with: event)
         }
@@ -655,7 +665,8 @@ extension MainViewController: ControlPanelViewDelegate {
         updateCaptureConfiguration { config in
             config.framesPerSecond = fps
         }
-        alignOutputTarget(syncUI: true)
+        alignOutputTarget(syncUI: false)
+        panel.refreshOutputTarget(captureFPS: fps, settings: settingsStore.snapshot())
         panel.setStatus(outputTargetStatus())
     }
 
@@ -685,11 +696,6 @@ extension MainViewController: ControlPanelViewDelegate {
             self?.refreshSafetyHint()
         }
         presentTransientSheet(settingsVC)
-    }
-
-    func controlPanelDidRequestMonitor(_ panel: ControlPanelView) {
-        guard presentedViewControllers?.isEmpty != false else { return }
-        presentTransientSheet(MonitorViewController())
     }
 
     func controlPanelDidRequestGuide(_ panel: ControlPanelView) {
@@ -726,8 +732,10 @@ extension MainViewController: ControlPanelViewDelegate {
         panel.setStatus(enabled ? "Dynamic Resolution: On" : "Dynamic Resolution: Off")
     }
 
+    // The panel already keeps minimum ≤ maximum on its own sliders, so a drag
+    // only stores the value instead of re-applying every control.
     func controlPanel(_ panel: ControlPanelView, didChangeDynamicMinimum value: Float) {
-        updateRenderSettings(syncUI: true) { settings in
+        updateRenderSettings { settings in
             settings.dynamicScaleMinimum = value
             if settings.dynamicScaleMaximum < value {
                 settings.dynamicScaleMaximum = value
@@ -736,7 +744,7 @@ extension MainViewController: ControlPanelViewDelegate {
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeDynamicMaximum value: Float) {
-        updateRenderSettings(syncUI: true) { settings in
+        updateRenderSettings { settings in
             settings.dynamicScaleMaximum = value
             if settings.dynamicScaleMinimum > value {
                 settings.dynamicScaleMinimum = value
@@ -745,11 +753,12 @@ extension MainViewController: ControlPanelViewDelegate {
     }
 
     func controlPanel(_ panel: ControlPanelView, didToggleFrameGeneration enabled: Bool) {
-        updateRenderSettings(syncUI: true) { settings in
+        let updated = settingsStore.update { settings in
             settings.frameGenerationEnabled = enabled
             let capture = max(self.captureConfiguration.framesPerSecond, 1)
             settings.targetPresentationFPS = enabled ? capture * settings.frameGenerationMode.multiplier : capture
         }
+        panel.refreshOutputTarget(captureFPS: captureConfiguration.framesPerSecond, settings: updated)
         panel.setStatus(outputTargetStatus())
     }
 

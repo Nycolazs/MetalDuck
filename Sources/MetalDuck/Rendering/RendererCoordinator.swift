@@ -149,7 +149,14 @@ final class RendererCoordinator: NSObject {
 
     @MainActor
     func start() async throws {
-        try await captureService.start()
+        // Draw the clear colour while the stream spins up, as before.
+        view?.isPaused = false
+        do {
+            try await captureService.start()
+        } catch {
+            pauseDrawing()
+            throw error
+        }
         running = true
         resetFrameState()
         frameGenerationEngine.reset()
@@ -177,6 +184,17 @@ final class RendererCoordinator: NSObject {
         )
         resetFrameState()
         frameGenerationEngine.reset()
+        pauseDrawing()
+    }
+
+    /// The overlay is hidden whenever nothing runs, so its render loop stops too,
+    /// instead of drawing the clear colour on the main thread at up to 120 fps.
+    @MainActor
+    private func pauseDrawing() {
+        guard let view, !view.isPaused else { return }
+        // Leave a clear frame behind, so the next start does not flash the last picture.
+        view.draw()
+        view.isPaused = true
     }
 
     @MainActor
@@ -213,7 +231,8 @@ final class RendererCoordinator: NSObject {
         let initialSettings = settingsStore.snapshot()
         view.preferredFramesPerSecond = preferredPresentationFPS(for: initialSettings)
         view.enableSetNeedsDisplay = false
-        view.isPaused = false
+        // Paused until a session starts; `start()` and `stop()` switch it.
+        view.isPaused = true
         view.delegate = self
     }
 

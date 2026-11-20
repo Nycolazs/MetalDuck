@@ -7,7 +7,7 @@ bash scripts/create_release.sh
 ```
 
 Generated artifact:
-- `dist/MetalDuck-1.3.dmg`
+- `dist/MetalDuck-1.3.1.dmg`
 
 DMG contents:
 - `MetalDuck.app`
@@ -15,16 +15,20 @@ DMG contents:
 
 ## Publish to GitHub Releases
 
-Example:
+The release notes are the matching section of `CHANGELOG.md`, so the release page
+always says what changed in that version:
 
 ```bash
-git tag -a v1.3 -m "MetalDuck v1.3"
+VERSION=1.3.1
+awk -v v="$VERSION" '/^## \[/{p=index($0,"["v"]")>0} p' CHANGELOG.md > /tmp/notes.md
+
+git tag -a "v$VERSION" -m "MetalDuck v$VERSION"
 git push origin main --tags
 
-gh release create v1.3 \
-  dist/MetalDuck-1.3.dmg \
-  --title "MetalDuck 1.3" \
-  --notes-file CHANGELOG.md
+gh release create "v$VERSION" \
+  "dist/MetalDuck-$VERSION.dmg" \
+  --title "MetalDuck $VERSION" \
+  --notes-file /tmp/notes.md
 ```
 
 ## Minimal release notes template

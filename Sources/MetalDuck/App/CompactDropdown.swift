@@ -101,6 +101,8 @@ final class CompactDropdown: NSControl {
         bounds.contains(convert(point, from: superview)) ? self : nil
     }
 
+    override var mouseDownCanMoveWindow: Bool { false }
+
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
     }
@@ -506,6 +508,8 @@ private final class MenuRow: AppearanceLayerView {
     override func mouseEntered(with event: NSEvent) {
         onHover?()
     }
+
+    override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
         onClick?()

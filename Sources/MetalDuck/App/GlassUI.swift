@@ -10,10 +10,11 @@ enum GlassMotion {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// Fades a label to new text; no-op when the text is unchanged.
+    /// Fades a label to new text; no-op when the text is unchanged. A zero
+    /// duration swaps the text at once (a zero-length transition would use the default).
     static func crossfade(_ label: NSTextField, to text: String, duration: CFTimeInterval = 0.25) {
         guard label.stringValue != text else { return }
-        if !reduceMotion {
+        if !reduceMotion, duration > 0 {
             label.wantsLayer = true
             let transition = CATransition()
             transition.type = .fade
@@ -68,26 +69,237 @@ enum GlassMotion {
         }
     }
 
+    /// Fades a view on Core Animation. AppKit's `animator().alphaValue` is stepped on
+    /// the main thread once per frame; this hands the whole fade to the render server.
+    /// Inside an animation group it borrows the group's duration and curve.
+    static func fade(
+        _ view: NSView,
+        from start: CGFloat? = nil,
+        to alpha: CGFloat,
+        duration: CFTimeInterval? = nil,
+        timing: CAMediaTimingFunction? = nil
+    ) {
+        let context = NSAnimationContext.current
+        let length = duration ?? context.duration
+        view.wantsLayer = true
+        let from = start.map(Float.init) ?? view.layer?.presentation()?.opacity ?? Float(view.alphaValue)
+        // Set the final value with implicit animation off, so AppKit does not also step it.
+        NSAnimationContext.runAnimationGroup { inner in
+            inner.duration = 0
+            inner.allowsImplicitAnimation = false
+            view.alphaValue = alpha
+        }
+        guard let layer = view.layer, length > 0, from != Float(alpha) else {
+            view.layer?.removeAnimation(forKey: "fade")
+            return
+        }
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = from
+        animation.toValue = Float(alpha)
+        animation.duration = length
+        animation.timingFunction = timing ?? context.timingFunction ?? CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(animation, forKey: "fade")
+    }
+
+    /// Lays views out at their final frames once, then lets Core Animation move every
+    /// layer under `roots` from where it was. AppKit's own frame animations step
+    /// `setFrame` on the main thread, and every step makes the window recompute its
+    /// drag regions over the whole view tree; this does that work once per change.
+    static func animateLayout(
+        of roots: [NSView],
+        duration: CFTimeInterval,
+        timing: CAMediaTimingFunction,
+        changes: () -> Void
+    ) {
+        // Hidden views have nowhere to move from; they appear at their new place.
+        func walk(_ layer: CALayer, _ body: (CALayer) -> Void) {
+            if let view = layer.delegate as? NSView, view.isHidden { return }
+            body(layer)
+            layer.sublayers?.forEach { walk($0, body) }
+            if let mask = layer.mask { walk(mask, body) }
+        }
+        let layers = roots.compactMap(\.layer)
+        var before: [ObjectIdentifier: (bounds: CGRect, position: CGPoint)] = [:]
+        if !reduceMotion {
+            for root in layers {
+                walk(root) { layer in
+                    let current = layer.presentation() ?? layer
+                    before[ObjectIdentifier(layer)] = (current.bounds, current.position)
+                }
+            }
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = timing
+            context.allowsImplicitAnimation = false
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            changes()
+            // Blur views size their inner layers when they draw, so draw now;
+            // otherwise those layers would jump to the end while the rest moves.
+            roots.forEach { $0.displayIfNeeded() }
+            CATransaction.commit()
+        }
+        guard !reduceMotion else { return }
+
+        for root in layers {
+            walk(root) { layer in
+                guard let old = before[ObjectIdentifier(layer)] else { return }
+                if old.bounds != layer.bounds {
+                    let animation = CABasicAnimation(keyPath: "bounds")
+                    animation.fromValue = NSValue(rect: old.bounds)
+                    animation.toValue = NSValue(rect: layer.bounds)
+                    animation.duration = duration
+                    animation.timingFunction = timing
+                    layer.add(animation, forKey: "layout.bounds")
+                }
+                if old.position != layer.position {
+                    let animation = CABasicAnimation(keyPath: "position")
+                    animation.fromValue = NSValue(point: old.position)
+                    animation.toValue = NSValue(point: layer.position)
+                    animation.duration = duration
+                    animation.timingFunction = timing
+                    layer.add(animation, forKey: "layout.position")
+                }
+            }
+        }
+    }
+
+    /// Wraps sublayer frame changes made in `layout()`. Inside an implicit view
+    /// animation the sublayers move with their view; otherwise they snap.
+    static func layoutTransaction(_ body: () -> Void) {
+        CATransaction.begin()
+        let context = NSAnimationContext.current
+        if context.allowsImplicitAnimation, context.duration > 0 {
+            CATransaction.setAnimationDuration(context.duration)
+            if let timing = context.timingFunction {
+                CATransaction.setAnimationTimingFunction(timing)
+            }
+        } else {
+            CATransaction.setDisableActions(true)
+        }
+        body()
+        CATransaction.commit()
+    }
+
+    private static var pageGeneration = 0
+    private static let pageKeys = ["page.fade", "page.move"]
+
+    /// Swaps two pages that share a frame. The old page fades and settles back,
+    /// the new one rises in, and `stagger` views follow it a beat apart. Runs on
+    /// Core Animation only, so nothing is laid out again while it plays.
+    static func transition(from outgoing: NSView, to incoming: NSView, stagger: [NSView], animated: Bool) {
+        pageGeneration += 1
+        let generation = pageGeneration
+        for view in [outgoing, incoming] + stagger {
+            pageKeys.forEach { view.layer?.removeAnimation(forKey: $0) }
+        }
+        incoming.isHidden = false
+        incoming.alphaValue = 1
+        guard animated, let outLayer = outgoing.layer, let inLayer = incoming.layer else {
+            outgoing.isHidden = true
+            outgoing.alphaValue = 1
+            return
+        }
+
+        let reduced = reduceMotion
+        CATransaction.begin()
+        CATransaction.setCompletionBlock {
+            MainActor.assumeIsolated {
+                guard generation == pageGeneration else { return }
+                outgoing.isHidden = true
+                outgoing.alphaValue = 1
+            }
+        }
+        let fadeOut = CABasicAnimation(keyPath: "opacity")
+        fadeOut.fromValue = outLayer.presentation()?.opacity ?? 1
+        fadeOut.toValue = 0
+        fadeOut.duration = reduced ? 0.12 : 0.16
+        fadeOut.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        outLayer.add(fadeOut, forKey: "page.fade")
+        outgoing.alphaValue = 0
+        if !reduced {
+            let settle = CABasicAnimation(keyPath: "transform")
+            settle.fromValue = NSValue(caTransform3D: CATransform3DIdentity)
+            settle.toValue = NSValue(caTransform3D: scaled(outLayer, 0.985))
+            settle.duration = 0.16
+            settle.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            outLayer.add(settle, forKey: "page.move")
+        }
+        CATransaction.commit()
+
+        let fadeIn = CABasicAnimation(keyPath: "opacity")
+        fadeIn.fromValue = 0
+        fadeIn.toValue = 1
+        fadeIn.duration = reduced ? 0.18 : 0.26
+        fadeIn.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        inLayer.add(fadeIn, forKey: "page.fade")
+        guard !reduced else { return }
+
+        let rise = CABasicAnimation(keyPath: "transform.translation.y")
+        rise.fromValue = -12
+        rise.toValue = 0
+        rise.duration = 0.42
+        rise.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+        inLayer.add(rise, forKey: "page.move")
+
+        for (index, view) in stagger.enumerated() {
+            view.wantsLayer = true
+            guard let layer = view.layer else { continue }
+            let begin = layer.convertTime(CACurrentMediaTime(), from: nil) + 0.05 + 0.035 * Double(index)
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0
+            fade.toValue = 1
+            fade.duration = 0.3
+            fade.beginTime = begin
+            fade.fillMode = .backwards
+            fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(fade, forKey: "page.fade")
+            let lift = CABasicAnimation(keyPath: "transform.translation.y")
+            lift.fromValue = -8
+            lift.toValue = 0
+            lift.duration = 0.4
+            lift.beginTime = begin
+            lift.fillMode = .backwards
+            lift.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            layer.add(lift, forKey: "page.move")
+        }
+    }
+
+    /// Scale about the centre of a layer whose anchor is its corner, as AppKit's are.
+    private static func scaled(_ layer: CALayer, _ factor: CGFloat) -> CATransform3D {
+        let center = CGPoint(x: layer.bounds.midX, y: layer.bounds.midY)
+        var transform = CATransform3DMakeTranslation(center.x, center.y, 0)
+        transform = CATransform3DScale(transform, factor, factor, 1)
+        return CATransform3DTranslate(transform, -center.x, -center.y, 0)
+    }
+
     /// Staggered fade-and-rise used when the window first appears.
     static func reveal(_ views: [NSView], delayStep: TimeInterval = 0.05) {
         guard !reduceMotion else { return }
+        // One pass of Core Animation with staggered begin times, rather than a timer
+        // per view and an AppKit alpha animation stepped on the main thread.
         for (index, view) in views.enumerated() {
             view.wantsLayer = true
-            view.alphaValue = 0
-            DispatchQueue.main.asyncAfter(deadline: .now() + delayStep * Double(index)) {
-                if let layer = view.layer {
-                    let rise = CABasicAnimation(keyPath: "transform.translation.y")
-                    rise.fromValue = -10
-                    rise.toValue = 0
-                    rise.duration = 0.45
-                    rise.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
-                    layer.add(rise, forKey: "reveal")
-                }
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.4
-                    view.animator().alphaValue = 1
-                }
-            }
+            guard let layer = view.layer else { continue }
+            let begin = layer.convertTime(CACurrentMediaTime(), from: nil) + delayStep * Double(index)
+            let rise = CABasicAnimation(keyPath: "transform.translation.y")
+            rise.fromValue = -10
+            rise.toValue = 0
+            rise.duration = 0.45
+            rise.beginTime = begin
+            rise.fillMode = .backwards
+            rise.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            layer.add(rise, forKey: "reveal")
+            let fade = CABasicAnimation(keyPath: "opacity")
+            fade.fromValue = 0
+            fade.toValue = 1
+            fade.duration = 0.4
+            fade.beginTime = begin
+            fade.fillMode = .backwards
+            fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(fade, forKey: "reveal.fade")
         }
     }
 }
@@ -272,11 +484,10 @@ private final class GlassEdgeView: AppearanceLayerView {
 
     override func layout() {
         super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        highlight.frame = bounds
-        highlightMask.frame = bounds
-        CATransaction.commit()
+        GlassMotion.layoutTransaction {
+            highlight.frame = bounds
+            highlightMask.frame = bounds
+        }
     }
 
     override func applyLayerColors() {
@@ -301,10 +512,9 @@ private final class GlassFillView: AppearanceLayerView {
 
     override func layout() {
         super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        gradient.frame = bounds
-        CATransaction.commit()
+        GlassMotion.layoutTransaction {
+            gradient.frame = bounds
+        }
     }
 
     override func applyLayerColors() {
@@ -342,14 +552,23 @@ class GlassSurface: NSView {
             blur.blendingMode = .withinWindow
             blur.state = .active
             blur.isEmphasized = true
-            blur.maskImage = Self.roundedMask(radius: cornerRadius)
             blur.translatesAutoresizingMaskIntoConstraints = false
+            // Rounded by a clipping layer rather than `maskImage`: AppKit resizes that
+            // mask outside any animation, so it would lag behind a panel that moves.
+            let clip = NSView()
+            clip.translatesAutoresizingMaskIntoConstraints = false
+            clip.wantsLayer = true
+            clip.layer?.cornerRadius = cornerRadius
+            clip.layer?.cornerCurve = .continuous
+            clip.layer?.masksToBounds = true
+            clip.addSubview(blur)
+            pin(blur, to: clip)
             let veil = GlassFillView(cornerRadius: cornerRadius)
             let edge = GlassEdgeView(cornerRadius: cornerRadius)
-            addSubview(blur)
+            addSubview(clip)
             addSubview(veil)
             addSubview(edge)
-            pin(blur, to: self)
+            pin(clip, to: self)
             pin(veil, to: self)
             pin(edge, to: self)
         }
@@ -361,18 +580,6 @@ class GlassSurface: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
-    }
-
-    private static func roundedMask(radius: CGFloat) -> NSImage {
-        let side = radius * 2 + 1
-        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
-            return true
-        }
-        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
-        image.resizingMode = .stretch
-        return image
     }
 }
 
@@ -600,6 +807,9 @@ final class GlassSegmentedControl: NSControl {
         bounds.contains(convert(point, from: superview)) ? self : nil
     }
 
+    /// The window moves by its background; a click here is always a click.
+    override var mouseDownCanMoveWindow: Bool { false }
+
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
     }
@@ -611,12 +821,10 @@ final class GlassSegmentedControl: NSControl {
     override func layout() {
         super.layout()
         track.layer?.cornerRadius = bounds.height / 2
-        guard !titles.isEmpty, !isAnimatingSelection else { return }
+        guard !titles.isEmpty else { return }
         selection.frame = selectionFrame()
         selection.layer?.cornerRadius = selection.frame.height / 2
     }
-
-    private var isAnimatingSelection = false
 
     private func selectionFrame() -> NSRect {
         let inner = bounds.insetBy(dx: 3, dy: 3)
@@ -625,23 +833,21 @@ final class GlassSegmentedControl: NSControl {
         return NSRect(x: inner.minX + width * index, y: inner.minY, width: width, height: inner.height)
     }
 
-    /// Slides the accent pill to the selected segment with a slight overshoot.
+    /// Slides the accent pill to the selected segment with a slight overshoot,
+    /// on Core Animation, so a click costs one frame change rather than one per frame.
     private func animateSelection() {
         guard !GlassMotion.reduceMotion, bounds.width > 0 else {
             needsLayout = true
             return
         }
-        isAnimatingSelection = true
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.32
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 1.3, 0.45, 1)
-            selection.animator().frame = selectionFrame()
-        }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                self?.isAnimatingSelection = false
-                self?.needsLayout = true
-            }
-        })
+        let target = selectionFrame()
+        GlassMotion.animateLayout(
+            of: [selection],
+            duration: 0.32,
+            timing: CAMediaTimingFunction(controlPoints: 0.3, 1.3, 0.45, 1)
+        ) {
+            selection.frame = target
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -676,7 +882,7 @@ final class GlassSegmentedControl: NSControl {
             label.textColor = color
             label.font = selected ? GlassFont.bodyMedium : GlassFont.body
         }
-        if !isAnimatingSelection {
+        if window == nil {
             needsLayout = true
         }
     }
@@ -771,13 +977,29 @@ final class MetricTile: NSView {
 }
 
 /// Small switch whose on-state uses the same accent as the rest of the panel.
+/// Drawn with layers: the knob slides on a spring, stretches while pressed,
+/// and the track colour fades, all on Core Animation.
 final class GlassSwitch: NSControl {
     nonisolated(unsafe) private var accentObserver: NSObjectProtocol?
+    private let track = CALayer()
+    private let knob = CALayer()
+    private var isPressed = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
         setAccessibilityRole(.checkBox)
+        setAccessibilityValue(false)
+
+        knob.backgroundColor = NSColor.white.cgColor
+        knob.shadowColor = NSColor.black.cgColor
+        knob.shadowOpacity = 0.22
+        knob.shadowRadius = 1.5
+        knob.shadowOffset = CGSize(width: 0, height: -0.5)
+        layer?.addSublayer(track)
+        layer?.addSublayer(knob)
+
         accentObserver = GlassAccent.observe { [weak self] in
             self?.needsDisplay = true
         }
@@ -795,36 +1017,103 @@ final class GlassSwitch: NSControl {
     }
 
     override var intrinsicContentSize: NSSize { NSSize(width: 32, height: 18) }
+    override var wantsUpdateLayer: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
 
     var isOn = false {
-        didSet { needsDisplay = true }
+        didSet {
+            guard oldValue != isOn else { return }
+            setAccessibilityValue(isOn)
+            moveKnob(animated: window != nil)
+            needsDisplay = true
+        }
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let on = isOn
-        let track = bounds
-        NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill(using: on ? GlassAccent.color : NSColor.white.withAlphaComponent(0.18))
-        let knob = track.height - 4
-        let x = on ? track.maxX - knob - 2 : track.minX + 2
-        NSColor.white.setFill()
-        NSBezierPath(ovalIn: NSRect(x: x, y: track.minY + 2, width: knob, height: knob)).fill()
+    override var isEnabled: Bool {
+        didSet { alphaValue = isEnabled ? 1 : 0.45 }
     }
 
-    override func mouseUp(with event: NSEvent) {
-        guard isEnabled, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
-        isOn.toggle()
-        sendAction(action, to: target)
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        track.frame = bounds
+        track.cornerRadius = bounds.height / 2
+        if knob.animationKeys()?.isEmpty ?? true {
+            knob.frame = knobFrame()
+            knob.cornerRadius = knob.frame.height / 2
+        }
+        CATransaction.commit()
+    }
+
+    override func updateLayer() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let off: NSColor = effectiveAppearance.isDark
+                ? .white.withAlphaComponent(0.18)
+                : .black.withAlphaComponent(0.14)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            GlassMotion.animate(track, backgroundColor: (isOn ? GlassAccent.color : off).cgColor, duration: 0.2)
+            CATransaction.commit()
+        }
+    }
+
+    private func knobFrame() -> CGRect {
+        let inset: CGFloat = 2
+        let diameter = max(bounds.height - inset * 2, 0)
+        let width = diameter + (isPressed ? 5 : 0)
+        let x = isOn ? bounds.width - inset - width : inset
+        return CGRect(x: x, y: inset, width: width, height: diameter)
+    }
+
+    private func moveKnob(animated: Bool) {
+        let target = knobFrame()
+        let fromPosition = knob.presentation()?.position ?? knob.position
+        let fromBounds = knob.presentation()?.bounds ?? knob.bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        knob.frame = target
+        knob.cornerRadius = target.height / 2
+        if animated, !GlassMotion.reduceMotion, bounds.width > 0 {
+            let spring = CASpringAnimation(keyPath: "position")
+            spring.damping = 19
+            spring.stiffness = 320
+            spring.mass = 0.7
+            spring.fromValue = NSValue(point: fromPosition)
+            spring.toValue = NSValue(point: knob.position)
+            spring.duration = spring.settlingDuration
+            knob.add(spring, forKey: "position")
+
+            let stretch = CABasicAnimation(keyPath: "bounds")
+            stretch.fromValue = NSValue(rect: fromBounds)
+            stretch.toValue = NSValue(rect: knob.bounds)
+            stretch.duration = 0.18
+            stretch.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            knob.add(stretch, forKey: "bounds")
+        }
+        CATransaction.commit()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        isPressed = true
+        moveKnob(animated: true)
+        var inside = true
+        while let next = window?.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            inside = bounds.contains(convert(next.locationInWindow, from: nil))
+            if next.type == .leftMouseUp { break }
+        }
+        isPressed = false
+        if inside {
+            isOn.toggle()
+            sendAction(action, to: target)
+        } else {
+            moveKnob(animated: true)
+        }
     }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
-    }
-}
-
-private extension NSBezierPath {
-    func fill(using color: NSColor) {
-        color.setFill()
-        fill()
     }
 }
 
@@ -926,7 +1215,10 @@ final class SidebarRow: AppearanceLayerView {
         layer?.cornerCurve = .continuous
 
         icon.widthAnchor.constraint(equalToConstant: GlassMetrics.rowIconWidth).isActive = true
-        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The title keeps the width it has in the open rail, and the rail clips it
+        // when narrow. Resizing it with the rail would redraw its text every frame.
+        titleLabel.setContentCompressionResistancePriority(.init(999), for: .horizontal)
+        titleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.maximumTitleWidth).isActive = true
 
         let stack = NSStackView(views: [icon, titleLabel])
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -957,18 +1249,25 @@ final class SidebarRow: AppearanceLayerView {
         }
     }
 
+    /// Room for a title in the open rail: row width minus the leading inset,
+    /// icon, spacing and trailing inset.
+    static let maximumTitleWidth: CGFloat = GlassMetrics.sidebarWidth - 20 - 10 - GlassMetrics.rowIconWidth - 8 - 10
+
     /// Call inside an animation group to fade the title with the sidebar.
     func setTitleVisible(_ visible: Bool, animated: Bool) {
         let alpha: CGFloat = visible ? 1 : 0
         if animated {
-            titleLabel.animator().alphaValue = alpha
+            GlassMotion.fade(titleLabel, to: alpha)
         } else {
             titleLabel.alphaValue = alpha
         }
     }
 
     private func refreshHoverAppearance() {
-        titleLabel.font = isSelected ? GlassFont.sidebarItemSelected : GlassFont.sidebarItem
+        let font = isSelected ? GlassFont.sidebarItemSelected : GlassFont.sidebarItem
+        if titleLabel.font != font {
+            titleLabel.font = font
+        }
         if isSelected {
             icon.contentTintColor = GlassAccent.color
         } else if isHovered {
@@ -1025,6 +1324,8 @@ final class SidebarRow: AppearanceLayerView {
         addCursorRect(bounds, cursor: .pointingHand)
     }
 
+    override var mouseDownCanMoveWindow: Bool { false }
+
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {
@@ -1038,7 +1339,6 @@ final class SidebarRow: AppearanceLayerView {
 final class SidebarListView: FlippedView {
     private let indicator = SidebarSelectionIndicator()
     private weak var selectedRow: NSView?
-    private var isAnimating = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1072,23 +1372,23 @@ final class SidebarListView: FlippedView {
             indicator.frame = target
             return
         }
-        isAnimating = true
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.42
-            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 1.25, 0.4, 1)
-            indicator.animator().frame = target
-        }, completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                self?.isAnimating = false
-                self?.needsLayout = true
-            }
-        })
+        GlassMotion.animateLayout(
+            of: [indicator],
+            duration: 0.42,
+            timing: CAMediaTimingFunction(controlPoints: 0.3, 1.25, 0.4, 1)
+        ) {
+            indicator.frame = target
+        }
         indicator.flashAccent()
     }
 
     override func layout() {
         super.layout()
-        guard !isAnimating, let row = selectedRow, row.superview != nil, row.bounds.height > 0 else { return }
+        guard let row = selectedRow, row.superview != nil else { return }
+        // The rows sit inside a stack that is laid out after this view, so settle
+        // it first; otherwise a single layout pass leaves the highlight behind.
+        subviews.forEach { $0.layoutSubtreeIfNeeded() }
+        guard row.bounds.height > 0 else { return }
         indicator.isHidden = false
         indicator.frame = convert(row.bounds, from: row)
     }
@@ -1126,10 +1426,9 @@ private final class SidebarSelectionIndicator: AppearanceLayerView {
 
     override func layout() {
         super.layout()
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        accentBar.frame = CGRect(x: 0, y: bounds.midY - 8, width: 3, height: 16)
-        CATransaction.commit()
+        GlassMotion.layoutTransaction {
+            accentBar.frame = CGRect(x: 0, y: bounds.midY - 8, width: 3, height: 16)
+        }
     }
 
     func flashAccent() {
@@ -1303,6 +1602,8 @@ final class GlassActionButton: NSControl {
     override func hitTest(_ point: NSPoint) -> NSView? {
         bounds.contains(convert(point, from: superview)) ? self : nil
     }
+
+    override var mouseDownCanMoveWindow: Bool { false }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)

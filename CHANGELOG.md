@@ -2,6 +2,25 @@
 
 All notable changes to the MetalDuck project will be documented in this file.
 
+## [1.3.1] - 2026-11-20
+
+### Interface
+- The Monitor is now a page inside the main window instead of a separate sheet. Click Monitor in the sidebar, then click it again or press Esc to return. It only updates while it is showing.
+- New silver duck app icon, and a redesigned installer disk image with a dark window, a background, a volume icon and a fixed layout.
+- Opening the sidebar slides it on Core Animation: the layout is computed once and the layers move, so it no longer re-lays out the window on every frame. The header and the page are pushed aside, never covered.
+- Switches rebuilt with layers: the knob slides on a spring and stretches while pressed. The segmented control pill, sidebar selection and entrance animations moved to Core Animation too.
+- Clicks on controls no longer start a window drag.
+
+### Performance
+- Opening and closing the sidebar costs about 160-180 ms of main-thread time for three cycles, down from about 1,000 ms.
+- Picking a profile reuses the sidebar rows instead of rebuilding them. Slider drags no longer re-apply every control, and capture reconfiguration runs one at a time with the latest values.
+- The overlay render loop pauses while nothing is running instead of drawing at up to 120 fps.
+- The Monitor's event log no longer loads the spell checker on first open, which caused a 66 ms hitch.
+
+### Release tooling
+- `scripts/create_release.sh` takes the version from `VERSION` (default 1.3.1) and writes it into the app, the disk image name, and the installer background.
+- `scripts/generate_brand_assets.swift` regenerates the icon and the installer backgrounds from `Designs/MetalDuck_Logo_Silver.png`. `DMG_THEME=light` builds the light installer.
+
 ## [1.3] - 2026-10-22
 
 ### Frame generation

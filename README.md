@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3-orange" alt="Version 1.3">
+  <img src="https://img.shields.io/badge/version-1.3.1-orange" alt="Version 1.3.1">
   <img src="https://img.shields.io/badge/platform-macOS%2015%2B-blue" alt="macOS 15 or later">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
@@ -30,7 +30,7 @@ The overlay follows the source and ignores mouse clicks, so you keep playing or 
 - **Dynamic resolution.** Lowers the scale while frames are late and raises it when there is headroom.
 - **Profiles.** Games, Anime, and Video are built in. The `+` button saves the current settings as your own profile.
 - **Guide.** The book icon in the sidebar explains each control and opens the GitHub repository.
-- **Monitor.** Live capture, output, and generation numbers, plus whether frames are warped or blended.
+- **Monitor.** A page inside the main window with live capture, output, and generation numbers, charts, load, and the event log. Click Monitor in the sidebar, then click it again or press Esc to go back.
 
 ## Using it
 
@@ -110,7 +110,7 @@ A release disk image, with the version written into the app:
 bash scripts/create_release.sh
 ```
 
-That writes `dist/MetalDuck-1.3.dmg`. Open it and drag MetalDuck to Applications.
+That writes `dist/MetalDuck-1.3.1.dmg`. Open it and drag MetalDuck to Applications.
 
 The current release is on [GitHub Releases](https://github.com/Nycolazs/MetalDuck/releases).
 
