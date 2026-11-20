@@ -1,0 +1,8 @@
+# Railway sets PORT; Caddy serves the static site on it.
+:{$PORT:8080} {
+	root * /srv
+	encode zstd gzip
+	header /assets/* Cache-Control "public, max-age=604800"
+	header ?Cache-Control "public, max-age=300"
+	file_server
+}

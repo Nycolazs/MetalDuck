@@ -1,0 +1,427 @@
+/* MetalDuck landing page.
+   Colour carries meaning: blue is a frame the source delivered, orange is a frame
+   MetalDuck built. Silver and graphite come from the app icon. */
+
+:root {
+  --graphite: #15181d;
+  --graphite-2: #1d2128;
+  --graphite-3: #262b34;
+  --steel: #3a414c;
+  --silver: #dde1e7;
+  --silver-dim: #9aa3af;
+  --capture: #5aa2ff;
+  --generate: #ff7a2e;
+
+  --display: "Unbounded", ui-rounded, system-ui, sans-serif;
+  --body: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+
+  /* Type scale: a perfect fourth from 17 px. */
+  --step-0: 1.0625rem;
+  --step-1: 1.417rem;
+  --step-2: 1.889rem;
+  --step-3: clamp(1.9rem, 1.2rem + 2.6vw, 2.52rem);
+  --step-4: clamp(2.3rem, 1.4rem + 2.6vw, 3.4rem);
+
+  --gutter: clamp(20px, 5vw, 64px);
+  --measure: 62ch;
+  --radius-panel: 22px;
+  --radius-control: 999px;
+}
+
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+body {
+  margin: 0;
+  background: var(--graphite);
+  color: var(--silver);
+  font-family: var(--body);
+  font-size: var(--step-0);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* The logo's dissolving pixels, as a faint field behind the top of the page. */
+body::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1100px;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgb(255 255 255 / 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.035) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: radial-gradient(120% 90% at 0% 0%, #000 0%, transparent 70%);
+  z-index: -1;
+}
+
+img, video, canvas { display: block; max-width: 100%; }
+
+a { color: inherit; }
+
+:focus-visible {
+  outline: 2px solid var(--capture);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+.skip:focus { left: 16px; top: 16px; z-index: 10; background: var(--graphite-2); padding: 8px 12px; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+h1, h2, h3 { margin: 0; font-family: var(--display); color: #fff; }
+h1, .h1 {
+  font-family: var(--display);
+  color: #fff;
+  font-size: var(--step-4);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+h2 {
+  font-size: var(--step-3);
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+p { margin: 0; }
+
+/* Secondary link next to the download button, and the compact one in the nav. */
+.ghost,
+.nav-download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 52px;
+  padding: 0 24px;
+  border-radius: var(--radius-control);
+  font-family: var(--display);
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--silver);
+  box-shadow: inset 0 0 0 1px var(--steel);
+  transition: box-shadow 160ms ease, color 160ms ease;
+}
+.ghost:hover,
+.nav-download:hover { box-shadow: inset 0 0 0 1px var(--silver-dim); color: #fff; }
+.nav-download {
+  min-height: 40px;
+  padding: 0 18px;
+  font-size: 0.85rem;
+  color: #14171c;
+  background: linear-gradient(180deg, #f4f6f9 0%, #c9ced6 55%, #a9b0ba 100%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.9);
+}
+.nav-download:hover { color: #14171c; filter: brightness(1.06); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.9); }
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 4px 2px;
+  color: var(--silver-dim);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.link-button:hover { color: var(--silver); }
+
+.fine { color: var(--silver-dim); font-size: 0.9rem; }
+
+/* Navigation */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  padding: 14px var(--gutter);
+  background: rgb(21 24 29 / 0.78);
+  backdrop-filter: blur(14px) saturate(140%);
+  border-bottom: 1px solid rgb(255 255 255 / 0.06);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+  color: #fff;
+}
+.nav nav { display: flex; gap: 22px; margin-left: auto; }
+.nav nav a { color: var(--silver-dim); text-decoration: none; font-size: 0.95rem; }
+.nav nav a:hover { color: #fff; }
+@media (max-width: 760px) { .nav nav { display: none; } .nav .nav-download { margin-left: auto; } }
+
+main > section { padding: clamp(72px, 10vw, 128px) var(--gutter) 0; max-width: 1240px; margin: 0 auto; }
+
+.section-head { max-width: 760px; display: grid; gap: 16px; margin-bottom: 44px; }
+.section-head p { color: var(--silver-dim); max-width: var(--measure); }
+
+/* Hero: copy on the left, the duck in liquid metal on the right, a live pixel grid behind. */
+.hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: clamp(24px, 4vw, 56px);
+  align-items: center;
+  padding-top: clamp(40px, 7vw, 96px) !important;
+  isolation: isolate;
+}
+@media (max-width: 1000px) { .hero { grid-template-columns: 1fr; } }
+.hero-grid {
+  position: absolute !important;
+  inset: 0 calc(50% - 50vw) -80px;
+  width: auto !important;
+  height: auto !important;
+  z-index: -1;
+  mask-image: radial-gradient(90% 85% at 30% 30%, #000 20%, transparent 80%);
+}
+.hero-copy { display: grid; gap: 24px; }
+.h1 p { margin: 0; gap: 0 0.26em; }
+.lede { font-size: var(--step-1); line-height: 1.45; color: var(--silver); max-width: 34ch; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.hero-metal { aspect-ratio: 1; width: 100%; max-width: 560px; justify-self: center; }
+.hero-metal .metallic-paint { width: 100%; height: 100%; }
+@media (max-width: 1000px) { .hero-metal { max-width: 340px; order: -1; } }
+
+.demo-section { padding-top: clamp(40px, 6vw, 72px) !important; }
+
+/* The demo: two lanes, one at the source's rate and one with generated frames. */
+.demo {
+  margin: 0;
+  padding: 22px;
+  border-radius: var(--radius-panel);
+  background: linear-gradient(180deg, var(--graphite-3), var(--graphite-2));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08), 0 40px 80px -40px rgb(0 0 0 / 0.9);
+  display: grid;
+  gap: 14px;
+}
+.demo-head { display: flex; gap: 18px; align-items: start; justify-content: space-between; }
+.demo-head p { color: var(--silver-dim); font-size: 0.95rem; max-width: 38ch; }
+@media (max-width: 560px) { .demo-head { flex-direction: column; } }
+
+.segmented {
+  flex: none;
+  display: inline-flex;
+  padding: 4px;
+  border-radius: var(--radius-control);
+  background: rgb(0 0 0 / 0.3);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.06);
+}
+.segmented button {
+  min-width: 52px;
+  min-height: 36px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--silver-dim);
+  font: 600 0.9rem var(--body);
+  cursor: pointer;
+  transition: background 200ms ease, color 200ms ease;
+}
+.segmented button[aria-checked="true"] { background: var(--generate); color: #1a0e06; }
+.segmented button[data-off][aria-checked="true"] { background: var(--steel); color: #fff; }
+
+.lane {
+  position: relative;
+  border-radius: 14px;
+  background: rgb(0 0 0 / 0.28);
+  overflow: hidden;
+}
+.lane canvas { width: 100%; height: 132px; }
+.lane-label {
+  position: absolute;
+  top: 10px;
+  left: 14px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--silver-dim);
+  pointer-events: none;
+}
+.lane-label b { margin-left: auto; font-variant-numeric: tabular-nums; color: #fff; font-weight: 600; }
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot-capture { background: var(--capture); }
+.dot-generate { background: var(--generate); }
+.demo figcaption { display: flex; justify-content: space-between; gap: 12px; font-size: 0.85rem; color: var(--silver-dim); }
+
+/* Profiles, shown like the rows in the app's sidebar. */
+.profile-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--steel); }
+.profile-list li {
+  display: grid;
+  grid-template-columns: 180px 1fr auto;
+  gap: 16px;
+  align-items: baseline;
+  padding: 22px 4px;
+  border-bottom: 1px solid var(--steel);
+}
+.profile-name { font-family: var(--display); font-weight: 700; font-size: var(--step-1); color: #fff; letter-spacing: -0.02em; }
+.profile-for { color: var(--silver-dim); }
+.profile-math { font-variant-numeric: tabular-nums; font-size: var(--step-1); color: var(--silver-dim); }
+.profile-math b { color: var(--generate); font-weight: 600; }
+@media (max-width: 640px) {
+  .profile-list li { grid-template-columns: 1fr auto; }
+  .profile-for { grid-column: 1 / -1; grid-row: 2; }
+}
+
+/* The pipeline is a real sequence, so it is numbered. Blue steps work on captured
+   frames; orange steps work on the frames MetalDuck builds. */
+.pipeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (max-width: 960px) { .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .pipeline { grid-template-columns: 1fr; } }
+.pipeline li { display: flex; }
+.step {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  width: 100%;
+  padding: 24px !important;
+  border-radius: var(--radius-panel) !important;
+  background: linear-gradient(180deg, var(--graphite-3), var(--graphite-2)) !important;
+}
+.step-number {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  font-family: var(--display);
+  font-weight: 700;
+  color: var(--capture);
+  background: rgb(90 162 255 / 0.14);
+}
+.step-number.is-generated { color: var(--generate); background: rgb(255 122 46 / 0.14); }
+.pipeline p { color: var(--silver-dim); font-size: 0.98rem; }
+.tech { font-size: 0.85rem; color: var(--silver); opacity: 0.75; }
+
+/* Screens */
+.screens { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(24px, 4vw, 48px); }
+@media (max-width: 860px) { .screens { grid-template-columns: 1fr; } }
+.screens figure { margin: 0; display: grid; gap: 14px; }
+.screens img { width: 100%; height: auto; }
+.screens figcaption { color: var(--silver-dim); font-size: 0.95rem; max-width: 46ch; }
+
+/* Measured */
+.measured-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 64px); align-items: start; }
+@media (max-width: 900px) { .measured-grid { grid-template-columns: 1fr; } }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 16px 12px 16px 0; border-bottom: 1px solid var(--steel); vertical-align: top; }
+thead th { color: var(--silver-dim); font-weight: 500; font-size: 0.9rem; }
+tbody th { font-weight: 500; color: var(--silver); width: 44%; }
+tbody td { color: var(--silver-dim); white-space: nowrap; }
+tbody td:last-child { color: #fff; font-weight: 600; }
+
+/* On a phone each row becomes a small block, labelled inline. */
+@media (max-width: 640px) {
+  thead { display: none; }
+  table, tbody, tr, th, td { display: block; width: auto !important; }
+  tr { padding: 14px 0; border-bottom: 1px solid var(--steel); }
+  th, td { border: 0; padding: 2px 0; white-space: normal; }
+  tbody th { margin-bottom: 6px; }
+  td::before { content: attr(data-label) ": "; color: var(--silver-dim); font-weight: 400; }
+}
+
+.psnr { display: grid; gap: 12px; }
+.psnr > p { color: var(--silver-dim); font-size: 0.95rem; }
+.bars { margin: 8px 0 0; display: grid; gap: 14px; }
+.bars div { display: grid; gap: 6px; }
+.bars dt { font-size: 0.9rem; color: var(--silver-dim); }
+.bars dd { margin: 0; display: flex; align-items: center; gap: 12px; font-variant-numeric: tabular-nums; color: #fff; font-weight: 600; }
+/* Bars start at 20 dB, so the differences are visible. */
+.bars .bar {
+  display: block;
+  flex: none;
+  height: 12px;
+  width: calc((var(--v) - 20) / 15 * 75%);
+  border-radius: 6px;
+  background: var(--steel);
+}
+.bars div:first-child .bar { background: linear-gradient(90deg, var(--capture), var(--generate)); }
+
+/* Limits */
+.limit-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 36px 56px; }
+@media (max-width: 760px) { .limit-list { grid-template-columns: 1fr; } }
+.limit-list li { display: grid; gap: 8px; padding-left: 18px; border-left: 2px solid var(--steel); }
+.limit-list p { color: var(--silver-dim); max-width: 48ch; }
+
+/* FAQ */
+.faq > * { max-width: 860px; }
+.faq h2 { margin-bottom: 28px; }
+details { border-top: 1px solid var(--steel); }
+details:last-of-type { border-bottom: 1px solid var(--steel); }
+summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 22px 36px 22px 0;
+  position: relative;
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: #fff;
+}
+summary::-webkit-details-marker { display: none; }
+summary::after {
+  content: "";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid var(--silver-dim);
+  border-bottom: 2px solid var(--silver-dim);
+  transform: translateY(-70%) rotate(45deg);
+  transition: transform 200ms ease;
+}
+details[open] summary::after { transform: translateY(-30%) rotate(-135deg); }
+details p { padding: 0 0 22px; color: var(--silver-dim); max-width: var(--measure); }
+
+/* Closing */
+.closing { display: grid; justify-items: center; text-align: center; gap: 22px; padding-bottom: clamp(72px, 10vw, 128px) !important; }
+.closing-pixels { width: 200px; border-radius: 44px; overflow: hidden; }
+.closing-pixels img { width: 100%; height: 100%; object-fit: contain; }
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  padding: 28px var(--gutter);
+  border-top: 1px solid rgb(255 255 255 / 0.06);
+  color: var(--silver-dim);
+  font-size: 0.9rem;
+}
+.footer span { margin-right: auto; }
+.footer a { color: var(--silver-dim); text-decoration: none; }
+.footer a:hover { color: #fff; }

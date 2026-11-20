@@ -14,6 +14,11 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
+<p align="center">
+  <a href="https://metalduck-production.up.railway.app">Website</a> ·
+  <a href="https://github.com/Nycolazs/MetalDuck/releases/latest">Download</a>
+</p>
+
 MetalDuck captures a window or a display, builds the frames in between the ones it captured, and can scale the picture with MetalFX before showing it in its own overlay. It is aimed at games, video, and anime playing on an Apple silicon Mac.
 
 The overlay follows the source and ignores mouse clicks, so you keep playing or watching in the original window. Frame generation needs the next real frame before it can draw the ones between, so the picture trails the source by roughly one captured frame.
@@ -113,6 +118,10 @@ bash scripts/create_release.sh
 That writes `dist/MetalDuck-1.3.1.dmg`. Open it and drag MetalDuck to Applications.
 
 The current release is on [GitHub Releases](https://github.com/Nycolazs/MetalDuck/releases).
+
+## Website
+
+The landing page at [metalduck-production.up.railway.app](https://metalduck-production.up.railway.app) lives in [`site/`](site/), with instructions for running and deploying it.
 
 ## License
 
