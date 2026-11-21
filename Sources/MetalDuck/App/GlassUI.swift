@@ -633,6 +633,8 @@ final class SettingsGroup: NSView {
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 6
+        // The title keeps its height: a group in the shorter column is never stretched.
+        header.setHuggingPriority(.required, for: .vertical)
 
         let card = GlassSurface()
         rows.translatesAutoresizingMaskIntoConstraints = false

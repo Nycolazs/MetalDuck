@@ -114,7 +114,33 @@ final class MainViewController: NSViewController {
         overlayController.hide()
         updateWindowTitle()
         setupShortcutManager()
+        #if DEBUG
+        startFromEnvironmentForTesting()
+        #endif
     }
+
+    #if DEBUG
+    /// Debug builds only: `METALDUCK_AUTOSTART=<part of a window title>` picks that window and
+    /// starts, and `METALDUCK_AUTOSTOP=<seconds>` stops again, so a run can be measured unattended.
+    private func startFromEnvironmentForTesting() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let match = environment["METALDUCK_AUTOSTART"], !match.isEmpty,
+              let index = windowEntries.firstIndex(where: { $0.title.localizedCaseInsensitiveContains(match) }) else {
+            return
+        }
+        selectedCaptureMode = .window
+        selectedWindowIndex = index
+        controlPanel.setCaptureMode(.window)
+        applyCaptureModeToPicker()
+        controlPanelDidPressStart(controlPanel)
+        if let seconds = environment["METALDUCK_AUTOSTOP"].flatMap(Double.init) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+                guard let self else { return }
+                self.controlPanelDidPressStop(self.controlPanel)
+            }
+        }
+    }
+    #endif
 
     private func setupShortcutManager() {
         ShortcutManager.shared.onTrigger = { [weak self] in
@@ -220,6 +246,10 @@ final class MainViewController: NSViewController {
             DispatchQueue.main.async {
                 self?.handleRendererError(error)
             }
+        }
+
+        renderer.onFirstFrame = { [weak self] in
+            self?.overlayController.revealPicture()
         }
     }
 
@@ -492,8 +522,9 @@ final class MainViewController: NSViewController {
 
                 let receivedStats = (self.lastStatsUpdateTime ?? 0) > startedAt
                 if !receivedStats {
+                    // The overlay stays invisible until a frame arrives, so nothing is covered.
                     self.controlPanel.setStatus(
-                        "No frames received. Check Screen Recording permission and selected source.",
+                        "No picture from the selected window yet. If it is full screen on another desktop, switch to it, or pick the window again.",
                         isError: true
                     )
                     self.overlayController.setWaitingForFrames(message: "Waiting for frames...")
@@ -526,6 +557,7 @@ final class MainViewController: NSViewController {
         settingsStore.targetPresentationFPS = settings.targetPresentationFPS
         settingsStore.frameGenerationEnabled = settings.frameGenerationEnabled
         settingsStore.frameGenerationMode = settings.frameGenerationMode
+        settingsStore.artifactGuard = settings.artifactGuard
     }
 
     private func applyCaptureConfiguration(_ config: CaptureConfiguration) {
@@ -779,6 +811,12 @@ extension MainViewController: ControlPanelViewDelegate {
         panel.setStatus(outputTargetStatus())
     }
 
+    func controlPanel(_ panel: ControlPanelView, didChangeArtifactGuard value: ArtifactGuard) {
+        updateRenderSettings { settings in
+            settings.artifactGuard = value
+        }
+        panel.setStatus("Artifact guard: \(value.rawValue)")
+    }
 
     func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID) {
         profileManager.selectProfile(id: id)

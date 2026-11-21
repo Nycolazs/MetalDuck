@@ -29,6 +29,29 @@ enum FrameGenerationMode: String, Codable, Equatable, CaseIterable {
     var title: String { "\(multiplier)×" }
 }
 
+/// What frame generation does with frame pairs whose motion it cannot follow (fast action,
+/// anime jumps): their in-between frames move toward the nearer real frame.
+enum ArtifactGuard: String, Codable, Equatable, CaseIterable {
+    /// Always build full in-between frames, even where the motion is a guess.
+    case off = "Off"
+    /// Calm the hardest pairs: fewer tears and see-through copies in fast action.
+    case balanced = "Balanced"
+    /// Calm hard pairs sooner: fewest artifacts, fast action closer to the source's rate.
+    case strong = "Strong"
+
+    /// Pair difficulty (share of the picture no known motion fits) from which in-betweens
+    /// start moving toward the nearer real frame, and from which only real frames are shown.
+    /// Nil when off. In tests, real footage stayed at or under 0.07% (fast aerial moves
+    /// included), fast objects over a pan reached 0.24-2.2%, and fast cel animation 1.0-2.9%.
+    var calmRange: (from: Float, full: Float)? {
+        switch self {
+        case .off: return nil
+        case .balanced: return (0.003, 0.015)
+        case .strong: return (0.001, 0.006)
+        }
+    }
+}
+
 struct RenderSettings: Codable, Equatable {
     var upscalingAlgorithm: UpscalingAlgorithm
     var outputScale: Float
@@ -41,6 +64,7 @@ struct RenderSettings: Codable, Equatable {
     var targetPresentationFPS: Int
     var frameGenerationEnabled: Bool
     var frameGenerationMode: FrameGenerationMode
+    var artifactGuard: ArtifactGuard
 
     init(
         upscalingAlgorithm: UpscalingAlgorithm = .metalFXSpatial,
@@ -53,7 +77,8 @@ struct RenderSettings: Codable, Equatable {
         dynamicScaleMaximum: Float = 1.0,
         targetPresentationFPS: Int = 120,
         frameGenerationEnabled: Bool = true,
-        frameGenerationMode: FrameGenerationMode = .x4
+        frameGenerationMode: FrameGenerationMode = .x4,
+        artifactGuard: ArtifactGuard = .balanced
     ) {
         self.upscalingAlgorithm = upscalingAlgorithm
         self.outputScale = outputScale
@@ -66,6 +91,30 @@ struct RenderSettings: Codable, Equatable {
         self.targetPresentationFPS = targetPresentationFPS
         self.frameGenerationEnabled = frameGenerationEnabled
         self.frameGenerationMode = frameGenerationMode
+        self.artifactGuard = artifactGuard
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case upscalingAlgorithm, outputScale, matchOutputResolution, samplingMode, sharpness
+        case dynamicResolutionEnabled, dynamicScaleMinimum, dynamicScaleMaximum
+        case targetPresentationFPS, frameGenerationEnabled, frameGenerationMode, artifactGuard
+    }
+
+    /// Profiles saved before the artifact guard existed load with it on (balanced).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        upscalingAlgorithm = try container.decode(UpscalingAlgorithm.self, forKey: .upscalingAlgorithm)
+        outputScale = try container.decode(Float.self, forKey: .outputScale)
+        matchOutputResolution = try container.decode(Bool.self, forKey: .matchOutputResolution)
+        samplingMode = try container.decode(SamplingMode.self, forKey: .samplingMode)
+        sharpness = try container.decode(Float.self, forKey: .sharpness)
+        dynamicResolutionEnabled = try container.decode(Bool.self, forKey: .dynamicResolutionEnabled)
+        dynamicScaleMinimum = try container.decode(Float.self, forKey: .dynamicScaleMinimum)
+        dynamicScaleMaximum = try container.decode(Float.self, forKey: .dynamicScaleMaximum)
+        targetPresentationFPS = try container.decode(Int.self, forKey: .targetPresentationFPS)
+        frameGenerationEnabled = try container.decode(Bool.self, forKey: .frameGenerationEnabled)
+        frameGenerationMode = try container.decode(FrameGenerationMode.self, forKey: .frameGenerationMode)
+        artifactGuard = try container.decodeIfPresent(ArtifactGuard.self, forKey: .artifactGuard) ?? .balanced
     }
 }
 
@@ -210,6 +259,10 @@ final class SettingsStore {
     var frameGenerationMode: FrameGenerationMode {
         get { snapshot().frameGenerationMode }
         set { update { $0.frameGenerationMode = newValue } }
+    }
+    var artifactGuard: ArtifactGuard {
+        get { snapshot().artifactGuard }
+        set { update { $0.artifactGuard = newValue } }
     }
 
     var shortcut: ShortcutSettings {

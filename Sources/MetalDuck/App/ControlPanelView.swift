@@ -53,6 +53,7 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didChangeDynamicMaximum value: Float)
     func controlPanel(_ panel: ControlPanelView, didToggleFrameGeneration enabled: Bool)
     func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationMode mode: FrameGenerationMode)
+    func controlPanel(_ panel: ControlPanelView, didChangeArtifactGuard value: ArtifactGuard)
     func controlPanel(_ panel: ControlPanelView, didToggleHUD visible: Bool)
 
     func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID)
@@ -132,6 +133,7 @@ final class ControlPanelView: NSView {
 
     // Frame generation: segment 0 is "Off", the rest map onto FrameGenerationMode.
     private let frameGenerationControl = GlassSegmented.make(["Off"] + FrameGenerationMode.allCases.map(\.title))
+    private let artifactGuardControl = GlassSegmented.make(ArtifactGuard.allCases.map(\.rawValue))
     private let outputTargetLabel = GlassLabel.make("—", font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold))
     private var resolvedTargetFPS = 0
 
@@ -216,6 +218,7 @@ final class ControlPanelView: NSView {
         } else {
             frameGenerationControl.selectedSegment = 0
         }
+        artifactGuardControl.selectedSegment = ArtifactGuard.allCases.firstIndex(of: settings.artifactGuard) ?? 1
 
         captureCursorSwitch.isOn = capture.showsCursor
         captureFPSSlider.integerValue = capture.framesPerSecond
@@ -442,7 +445,10 @@ final class ControlPanelView: NSView {
         frameGenerationControl.target = self
         frameGenerationControl.action = #selector(handleFrameGenerationChanged)
 
-        for control in [frameGenerationControl, samplingControl, upscalerDropdown] as [NSView] {
+        artifactGuardControl.target = self
+        artifactGuardControl.action = #selector(handleArtifactGuardChanged)
+
+        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown] as [NSView] {
             control.widthAnchor.constraint(equalToConstant: GlassMetrics.controlWidth).isActive = true
         }
 
@@ -855,7 +861,9 @@ final class ControlPanelView: NSView {
         columns.alignment = .top
         columns.distribution = .fillEqually
         columns.spacing = GlassMetrics.columnSpacing
-        columns.setHuggingPriority(.required, for: .vertical)
+        // Not required: a required hug stretches the shorter column to the taller one's
+        // height, and its group titles drift down inside the extra space.
+        columns.setHuggingPriority(.defaultLow, for: .vertical)
         return columns
     }
 
@@ -970,6 +978,7 @@ final class ControlPanelView: NSView {
         outputTargetLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         group.addRow(SettingRow.control("Multiplier", symbol: "sparkles", help: "2×, 3× and 4× mean that many presented frames per captured frame.", control: frameGenerationControl))
         group.addRow(SettingRow.control("Output", symbol: "gauge.with.dots.needle.67percent", help: "The frame rate MetalDuck presents: capture rate × multiplier. It follows the multiplier, so there is no separate limit to guess.", control: outputTargetLabel))
+        group.addRow(SettingRow.control("Artifact guard", symbol: "shield.lefthalf.filled", help: "In fast action, in-between frames can tear or show see-through copies of what moves. Balanced and Strong keep those moments closer to the real frames: clean, a little less smooth there. Calm scenes are not affected.", control: artifactGuardControl))
         group.addRow(SettingRow.control("Stats overlay", symbol: "chart.bar.xaxis", help: "Show capture, generated and output FPS in the corner of the scaled window.", control: hudSwitch))
         return group
     }
@@ -1176,6 +1185,14 @@ final class ControlPanelView: NSView {
         let index = samplingControl.selectedSegment
         guard modes.indices.contains(index) else { return }
         delegate?.controlPanel(self, didChangeSamplingMode: modes[index])
+    }
+
+    @objc private func handleArtifactGuardChanged() {
+        guard !isApplyingValues else { return }
+        let values = ArtifactGuard.allCases
+        let index = artifactGuardControl.selectedSegment
+        guard values.indices.contains(index) else { return }
+        delegate?.controlPanel(self, didChangeArtifactGuard: values[index])
     }
 
     @objc private func handleFrameGenerationChanged() {

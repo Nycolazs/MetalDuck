@@ -36,14 +36,27 @@ final class ScalingOverlayController {
             window.setFrame(Self.defaultOutputFrame(for: targetScreen), display: true, animate: false)
         }
         outputViewController.updateColorSpace(targetScreen.colorSpace?.cgColorSpace)
+        // A fresh overlay stays invisible until the first captured frame is drawn
+        // (`revealPicture`). A source that sends nothing, such as a window full screen on
+        // another desktop, otherwise covered the screen in black.
+        if !window.isVisible {
+            window.alphaValue = 0
+        }
         window.orderFrontRegardless()
         outputViewController.setProcessingState(isRunning: true)
+    }
+
+    func revealPicture() {
+        guard let window = outputWindow, window.isVisible, window.alphaValue < 1 else { return }
+        window.alphaValue = 1
     }
 
     func hide() {
         outputViewController.setProcessingState(isRunning: false)
         // Simply ordering out is safer than toggling fullscreen during a transition
         outputWindow?.orderOut(nil)
+        outputWindow?.level = Self.belowMenus
+        setJoinsFullScreenSpaces(false)
     }
 
     func updateFrame(to rect: CGRect) {
@@ -56,16 +69,71 @@ final class ScalingOverlayController {
             // Add a small safety to prevent impossible sizing from causing errors
             cocoaRect.size.width = max(1.0, cocoaRect.size.width)
             cocoaRect.size.height = max(1.0, cocoaRect.size.height)
-            if let screen = self.currentScreen ?? self.outputWindow?.screen {
-                cocoaRect = Self.clampedToVisibleFrame(cocoaRect, on: screen)
+
+            // A full-screen source fills the display (below the notch on MacBooks with one).
+            // Cover exactly what it covers, and sit under the Dock and menu bar so they
+            // still slide in over the picture.
+            let fullScreen = NSScreen.screens.contains { Self.isFullScreen(cocoaRect, on: $0) }
+            let level: NSWindow.Level
+            if fullScreen {
+                level = Self.underDockAndMenus
+            } else {
+                if let screen = self.currentScreen ?? self.outputWindow?.screen {
+                    cocoaRect = Self.clampedToVisibleFrame(cocoaRect, on: screen)
+                }
+                level = Self.belowMenus
             }
-            guard let window = self.outputWindow, window.frame != cocoaRect else { return }
-            window.setFrame(cocoaRect, display: true, animate: false)
+            // Leave one point of the source uncovered. macOS tells an app its window is
+            // hidden only when none of it shows, and browsers like Firefox stop drawing then,
+            // which froze the very video being scaled. One point keeps it "visible".
+            if cocoaRect.height > 2 {
+                cocoaRect.origin.y += 1
+                cocoaRect.size.height -= 1
+            }
+            guard let window = self.outputWindow else { return }
+            if window.level != level {
+                window.level = level
+                self.setJoinsFullScreenSpaces(fullScreen)
+                PipelineLog.shared.event("capture", fullScreen
+                    ? "source is full screen: overlay joins its Space and covers it, under the Dock and menu bar"
+                    : "source left full screen: overlay back above ordinary windows")
+            }
+            if window.frame != cocoaRect {
+                window.setFrame(cocoaRect, display: true, animate: false)
+            }
+        }
+    }
+
+    /// True when `rect` (Cocoa coordinates) fills `screen`: full width, down to the bottom,
+    /// and up to the top or to just under the notch strip. Apps stop at different heights
+    /// there (Firefox leaves the menu bar's 37 pt, the notch itself is 32 pt), so allow up
+    /// to 60 pt, which no ordinary window that fills the width reaches by accident.
+    private static func isFullScreen(_ rect: CGRect, on screen: NSScreen) -> Bool {
+        let frame = screen.frame
+        let topGap = frame.maxY - rect.maxY
+        return abs(rect.minX - frame.minX) <= 2 && abs(rect.width - frame.width) <= 4 &&
+            abs(rect.minY - frame.minY) <= 2 && topGap >= -2 && topGap <= 60
+    }
+
+    /// macOS only lets another app's window into a full-screen Space when that app runs
+    /// as a menu-bar (accessory) app. While the source is full screen, MetalDuck does:
+    /// its Dock icon steps aside, and the menu-bar item stays for Stop.
+    private func setJoinsFullScreenSpaces(_ joins: Bool) {
+        let policy: NSApplication.ActivationPolicy = joins ? .accessory : .regular
+        guard NSApp.activationPolicy() != policy else { return }
+        NSApp.setActivationPolicy(policy)
+        // Re-show the picture only when joining a full-screen Space. On the way out the
+        // window may already be hidden (Stop); bringing it back left a black screen.
+        if joins, let window = outputWindow, window.isVisible {
+            window.orderFrontRegardless()
         }
     }
 
     /// Popup menus are 101. Stay above the game, Dock, and ordinary windows, but under every menu.
     static let belowMenus = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue - 1)
+    /// Over a full-screen app's window, but under the Dock (20) and the menu bar (24),
+    /// which macOS slides in over a full-screen Space.
+    static let underDockAndMenus = NSWindow.Level(rawValue: 19)
 
     /// Keeps the menu bar and Dock outside the picture, so Force Quit stays reachable.
     private static func clampedToVisibleFrame(_ rect: CGRect, on screen: NSScreen) -> CGRect {
@@ -111,19 +179,25 @@ final class ScalingOverlayController {
             return outputWindow
         }
 
-        let window = NSWindow(
+        // A non-activating panel: macOS only shows another app's window inside a
+        // full-screen Space when it is a panel marked as a full-screen auxiliary. A plain
+        // window stayed on the desktop while the video played full screen.
+        let window = OverlayPanel(
             contentRect: Self.defaultOutputFrame(for: screen),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false,
             screen: screen
         )
+        window.isFloatingPanel = true
+        window.hidesOnDeactivate = false
+        window.becomesKeyOnlyIfNeeded = true
         window.title = "MetalDuck Overlay"
         // Ensure it can be perfectly sized to the source without arbitrary limits
-        window.minSize = NSSize(width: 100, height: 100) 
+        window.minSize = NSSize(width: 100, height: 100)
         window.isOpaque = false
         window.backgroundColor = NSColor.clear
-        window.collectionBehavior = [.canJoinAllSpaces, .ignoresCycle, .transient, .stationary, .fullScreenAuxiliary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         // Just under popup menus. screenSaver (1000) sits above the menu bar, so the
         // status menu and Quit open behind the picture and cannot be clicked.
         window.level = Self.belowMenus
@@ -157,4 +231,10 @@ final class ScalingOverlayController {
             return CGDirectDisplayID(screenNumber.uint32Value) == displayID
         }
     }
+}
+
+/// The scaled picture. It never takes focus, so the source keeps the keyboard and mouse.
+private final class OverlayPanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 }

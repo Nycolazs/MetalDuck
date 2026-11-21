@@ -139,7 +139,7 @@ export default function App() {
               <DownloadButton label="Download for Mac" />
               <a className="ghost" href={REPO}>Read the source</a>
             </div>
-            <p className="fine">Free and MIT licensed. Version 1.3.1, for Apple silicon Macs on macOS 15 or later.</p>
+            <p className="fine">Free and MIT licensed. Version 1.3.2, for Apple silicon Macs on macOS 15 or later.</p>
           </div>
           <div className="hero-metal" aria-hidden="true">
             <MetallicPaint
@@ -296,7 +296,7 @@ export default function App() {
           <h2 id="closing-title">
             <ShinyText text="Give your Mac a smoother picture." color="#ffffff" shineColor="#9fc7ff" speed={3.2} />
           </h2>
-          <DownloadButton label="Download MetalDuck 1.3.1" />
+          <DownloadButton label="Download MetalDuck 1.3.2" />
           <p className="fine">Requires an Apple silicon Mac with macOS 15 or later.</p>
         </section>
       </main>

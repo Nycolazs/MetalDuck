@@ -47,11 +47,13 @@ enum CaptureSourceCatalogProvider {
                 return CaptureDisplaySource(displayID: display.displayID, title: title)
             }
 
+        // A full-screen window lives on its own Space, so it is not "on screen" while you are
+        // here picking it. Keep windows that fill a display, too.
         let windows: [CaptureWindowSource] = content.windows
             .filter { window in
-                window.isOnScreen &&
-                    window.windowLayer == 0 &&
-                    window.owningApplication?.processID != currentPID
+                window.windowLayer == 0 &&
+                    window.owningApplication?.processID != currentPID &&
+                    (window.isOnScreen || ScreenCaptureKitCaptureService.fillsDisplay(window.frame))
             }
             .sorted { lhs, rhs in
                 let lhsArea = lhs.frame.width * lhs.frame.height
@@ -63,7 +65,8 @@ enum CaptureSourceCatalogProvider {
                 let appName = window.owningApplication?.applicationName ?? "Unknown App"
                 let trimmedWindowTitle = window.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let baseTitle = trimmedWindowTitle.isEmpty ? "Untitled Window" : trimmedWindowTitle
-                let title = "\(appName) • \(baseTitle)"
+                let fullScreen = ScreenCaptureKitCaptureService.fillsDisplay(window.frame) ? " (full screen)" : ""
+                let title = "\(appName) • \(baseTitle)\(fullScreen)"
                 return CaptureWindowSource(windowID: window.windowID, title: title)
             }
 

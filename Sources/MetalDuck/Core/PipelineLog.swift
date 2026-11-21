@@ -76,6 +76,7 @@ final class PipelineLog: @unchecked Sendable {
     private var windowStart = CACurrentMediaTime()
     private var captureCount = 0
     private var captureDropCount = 0
+    private var repeatsSkipped = 0
     private var captureIntervalSum = 0.0
     private var captureIntervalMax = 0.0
     private var captureIntervalSamples = 0
@@ -122,6 +123,10 @@ final class PipelineLog: @unchecked Sendable {
     private var drawCount = 0
     private var drawMillisecondsSum = 0.0
     private var drawMillisecondsMax = 0.0
+    private var timings: [String: TimingStat] = [:]
+    private var gpuCount = 0
+    private var gpuMillisecondsSum = 0.0
+    private var gpuMillisecondsMax = 0.0
     private var upscaleFallbacks = 0
     private var upscaleDescription = "not used yet"
 
@@ -141,6 +146,7 @@ final class PipelineLog: @unchecked Sendable {
         var elapsed: Double
         var captureCount: Int
         var captureDropCount: Int
+        var repeatsSkipped: Int
         var captureIntervalSum: Double
         var captureIntervalMax: Double
         var captureIntervalSamples: Int
@@ -178,6 +184,10 @@ final class PipelineLog: @unchecked Sendable {
         var drawCount: Int
         var drawMillisecondsSum: Double
         var drawMillisecondsMax: Double
+        var timings: [String: TimingStat]
+        var gpuCount: Int
+        var gpuMillisecondsSum: Double
+        var gpuMillisecondsMax: Double
         var upscaleFallbacks: Int
         var upscaleDescription: String
         var settingsLine: String
@@ -387,6 +397,13 @@ final class PipelineLog: @unchecked Sendable {
         }
     }
 
+    /// A captured frame showing the same picture as the last one, left out on purpose.
+    func noteRepeatSkipped() {
+        lock.lock()
+        repeatsSkipped += 1
+        lock.unlock()
+    }
+
     func noteCaptureDrop(_ reason: String) {
         var shouldLog = false
         lock.lock()
@@ -530,6 +547,26 @@ final class PipelineLog: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// GPU time one output frame took, from its command buffer.
+    func noteGPUTime(milliseconds: Double) {
+        guard milliseconds > 0, milliseconds < 1000 else { return }
+        lock.lock()
+        gpuCount += 1
+        gpuMillisecondsSum += milliseconds
+        gpuMillisecondsMax = max(gpuMillisecondsMax, milliseconds)
+        lock.unlock()
+    }
+
+    /// One sample of a named timing, in milliseconds, summarised in the next one-second block.
+    func noteTiming(_ name: String, milliseconds: Double) {
+        guard milliseconds.isFinite else { return }
+        lock.lock()
+        var stat = timings[name] ?? TimingStat()
+        stat.add(milliseconds)
+        timings[name] = stat
+        lock.unlock()
+    }
+
     func finishFrame(
         drawMilliseconds: Double,
         settings: RenderSettings,
@@ -586,6 +623,7 @@ final class PipelineLog: @unchecked Sendable {
             elapsed: elapsed,
             captureCount: captureCount,
             captureDropCount: captureDropCount,
+            repeatsSkipped: repeatsSkipped,
             captureIntervalSum: captureIntervalSum,
             captureIntervalMax: captureIntervalMax,
             captureIntervalSamples: captureIntervalSamples,
@@ -623,6 +661,10 @@ final class PipelineLog: @unchecked Sendable {
             drawCount: drawCount,
             drawMillisecondsSum: drawMillisecondsSum,
             drawMillisecondsMax: drawMillisecondsMax,
+            timings: timings,
+            gpuCount: gpuCount,
+            gpuMillisecondsSum: gpuMillisecondsSum,
+            gpuMillisecondsMax: gpuMillisecondsMax,
             upscaleFallbacks: upscaleFallbacks,
             upscaleDescription: upscaleDescription,
             settingsLine: Self.describe(settings: settings, captureFPS: configuredCaptureFPS)
@@ -636,6 +678,7 @@ final class PipelineLog: @unchecked Sendable {
         windowStart = CACurrentMediaTime()
         captureCount = 0
         captureDropCount = 0
+        repeatsSkipped = 0
         captureIntervalSum = 0
         captureIntervalMax = 0
         captureIntervalSamples = 0
@@ -663,6 +706,10 @@ final class PipelineLog: @unchecked Sendable {
         drawCount = 0
         drawMillisecondsSum = 0
         drawMillisecondsMax = 0
+        timings = [:]
+        gpuCount = 0
+        gpuMillisecondsSum = 0
+        gpuMillisecondsMax = 0
         upscaleFallbacks = 0
         maxFlowLag = 0
         return snapshot
@@ -695,6 +742,7 @@ final class PipelineLog: @unchecked Sendable {
         lines.append(snapshot.generationLine)
         lines.append(
             "capture: \(Self.fps(captureFPS)) fps  \(snapshot.captureWidth)x\(snapshot.captureHeight)  interval avg \(Self.milliseconds(captureIntervalAvg)) max \(Self.milliseconds(snapshot.captureIntervalMax * 1000))  drops \(snapshot.captureDropCount)\(snapshot.lastDropReason.isEmpty ? "" : " (\(snapshot.lastDropReason))")"
+                + (snapshot.repeatsSkipped > 0 ? "  repeats skipped \(snapshot.repeatsSkipped) (same picture as the frame before)" : "")
         )
         lines.append(
             "output: \(Self.fps(outputFPS)) fps  flow \(snapshot.presentFlow)  blend \(snapshot.presentBlend)  passthrough \(snapshot.presentPassthrough)  repeated \(snapshot.presentRepeated)  no-frame \(snapshot.presentNoFrame)"
@@ -733,8 +781,16 @@ final class PipelineLog: @unchecked Sendable {
             )
         }
         lines.append("upscale: \(snapshot.upscaleDescription)  metalFX fallbacks \(snapshot.upscaleFallbacks)")
+        if !snapshot.timings.isEmpty {
+            let parts = snapshot.timings.keys.sorted().compactMap { name -> String? in
+                guard let stat = snapshot.timings[name], stat.count > 0 else { return nil }
+                return "\(name) avg \(String(format: "%.1f", stat.sum / Double(stat.count))) min \(String(format: "%.1f", stat.minValue)) max \(String(format: "%.1f", stat.maxValue)) ×\(stat.count)"
+            }
+            lines.append("timing (ms): " + parts.joined(separator: "  |  "))
+        }
         lines.append(
             "load: process CPU \(Self.percent(snapshot.processCPU))  system CPU \(Self.percent(snapshot.systemCPU))  RSS \(String(format: "%.0f", snapshot.residentMB)) MB  draw avg \(Self.milliseconds(drawAvg)) max \(Self.milliseconds(snapshot.drawMillisecondsMax)) over \(snapshot.drawCount) draws"
+                + "  frame GPU avg \(Self.milliseconds(snapshot.gpuCount > 0 ? snapshot.gpuMillisecondsSum / Double(snapshot.gpuCount) : 0)) max \(Self.milliseconds(snapshot.gpuMillisecondsMax))"
         )
         let verdictText = verdict(snapshot)
         lines.append("verdict: \(verdictText)")
@@ -878,7 +934,7 @@ final class PipelineLog: @unchecked Sendable {
 
     private static func describe(settings: RenderSettings, captureFPS: Int) -> String {
         let fg = settings.frameGenerationEnabled
-            ? "frame generation ON \(settings.frameGenerationMode.rawValue)"
+            ? "frame generation ON \(settings.frameGenerationMode.rawValue)  artifactGuard=\(settings.artifactGuard.rawValue)"
             : "frame generation OFF"
         return "\(fg)  upscale=\(settings.upscalingAlgorithm.rawValue)  scale=\(String(format: "%.2f", settings.outputScale))  matchOutput=\(settings.matchOutputResolution)  sharpness=\(String(format: "%.2f", settings.sharpness))  drs=\(settings.dynamicResolutionEnabled)  configuredCapture=\(captureFPS)fps  target=\(settings.targetPresentationFPS)fps"
     }
@@ -964,5 +1020,19 @@ private extension NSLock {
         lock()
         defer { unlock() }
         return body()
+    }
+}
+
+struct TimingStat {
+    var sum = 0.0
+    var count = 0
+    var minValue = Double.infinity
+    var maxValue = -Double.infinity
+
+    mutating func add(_ value: Double) {
+        sum += value
+        count += 1
+        minValue = min(minValue, value)
+        maxValue = max(maxValue, value)
     }
 }

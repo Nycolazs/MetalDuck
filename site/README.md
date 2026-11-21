@@ -29,6 +29,6 @@ railway up --service metalduck
 
 ## Updating for a new release
 
-The version and download links are in `src/App.tsx` (`DOWNLOAD`, and the "Version 1.3.1"
+The version and download links are in `src/App.tsx` (`DOWNLOAD`, and the "Version 1.3.2"
 text). The app screenshots in `public/assets/` come from
 `scripts/generate_mac_mockups.swift` in the repository root.

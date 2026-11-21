@@ -299,7 +299,7 @@ func renderBackground(scale: CGFloat, theme: DMGTheme) -> CGContext {
     // Instructions.
     drawText(ctx, "Drag MetalDuck to Applications to install", font: .systemFont(ofSize: 14, weight: .medium),
              color: theme.body, center: flip(CGPoint(x: 330, y: 330)))
-    drawText(ctx, "Version 1.3.1  ·  Requires Apple silicon and macOS 15 or later",
+    drawText(ctx, "Version 1.3.2  ·  Requires Apple silicon and macOS 15 or later",
              font: .systemFont(ofSize: 11, weight: .regular),
              color: theme.caption, center: flip(CGPoint(x: 330, y: 356)))
 

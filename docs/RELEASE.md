@@ -7,7 +7,7 @@ bash scripts/create_release.sh
 ```
 
 Generated artifact:
-- `dist/MetalDuck-1.3.1.dmg`
+- `dist/MetalDuck-1.3.2.dmg`
 
 DMG contents:
 - `MetalDuck.app`
@@ -19,7 +19,7 @@ The release notes are the matching section of `CHANGELOG.md`, so the release pag
 always says what changed in that version:
 
 ```bash
-VERSION=1.3.1
+VERSION=1.3.2
 awk -v v="$VERSION" '/^## \[/{p=index($0,"["v"]")>0} p' CHANGELOG.md > /tmp/notes.md
 
 git tag -a "v$VERSION" -m "MetalDuck v$VERSION"

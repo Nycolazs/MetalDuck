@@ -12,4 +12,6 @@ struct CapturedFrame {
 
     // Keep this reference alive for frames that come from CVMetalTexture wrappers.
     let backingTexture: CVMetalTexture?
+    /// The first frame after a cut between shots. Nothing moves from the frame before it.
+    var startsNewShot = false
 }

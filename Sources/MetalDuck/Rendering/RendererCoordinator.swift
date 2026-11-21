@@ -35,6 +35,8 @@ final class RendererCoordinator: NSObject {
     var onStatsUpdate: ((RendererStats) -> Void)?
     var onGeometryUpdate: ((CGRect) -> Void)?
     var onError: ((Error) -> Void)?
+    /// Called on the main thread when a session draws its first captured frame.
+    var onFirstFrame: (@MainActor @Sendable () -> Void)?
 
     private let context: MetalContext
     private let captureService: FrameCaptureService
@@ -47,10 +49,6 @@ final class RendererCoordinator: NSObject {
 
     private weak var view: MTKView?
 
-    private let frameLock = NSLock()
-    private var latestFrame: CapturedFrame?
-    private var latestFrameSequence: UInt64 = 0
-    private var processedFrameSequence: UInt64 = 0
 
     private let statsLock = NSLock()
     private var rawCaptureFrameCounter: Int = 0
@@ -58,7 +56,6 @@ final class RendererCoordinator: NSObject {
     private var generatedFrameCounter: Int = 0
     private var fpsWindowStart: CFTimeInterval = CACurrentMediaTime()
 
-    private var latestFrameArrival: CFTimeInterval = 0
 
     private var upscaledScratchTexture: MTLTexture?
     private var secondaryUpscaledScratchTexture: MTLTexture?
@@ -70,6 +67,8 @@ final class RendererCoordinator: NSObject {
         let id: UInt64
         let time: CFTimeInterval
         let flowFrame: VisionFlowProvider.FlowFrame?
+        /// First frame after a cut: nothing is built between it and the frame before.
+        let newShot: Bool
     }
 
     private static let stagingSlots = 5
@@ -81,10 +80,26 @@ final class RendererCoordinator: NSObject {
     private var nextFrameID: UInt64 = 0
     private var captureInterval: Double = 1.0 / 60.0
     private var recentCaptureIntervals: [Double] = []
+    private var cadence = CadenceTracker()
     private var presentationDelay: Double = 0
-    private let presentClock = PresentClock()
     private var preferredScreenRate = 60
+    /// When the frame being drawn will reach the screen.
+    private var targetPresentTime: CFTimeInterval = 0
+
+    /// Frames are drawn on a thread of their own, paced by a display link there. MTKView drew
+    /// on the main thread and blocked there for a free drawable, about 8 of every 8.3 ms at
+    /// 120 Hz, so any other main-thread work made the next frame miss its refresh.
+    private let renderLock = NSLock()
+    private var displayLink: CAMetalDisplayLink?
+    private var firstFrameShown = false
+    private var linkFrameRate = 0
+    private var screenMaxFPS = 60
+    private static let clearColor = MTLClearColor(red: 0.06, green: 0.07, blue: 0.08, alpha: 1.0)
     private var lastShownFrameID: UInt64?
+    /// Frames whose pair with the frame before has been judged related or not, for the log.
+    private var judgedPairs = Set<UInt64>()
+    /// Frames whose pair with the frame before has had its difficulty logged.
+    private var measuredPairs = Set<UInt64>()
     private var latestCaptureTime: CFTimeInterval = 0
     /// The source moment the frame being drawn depicts.
     private var presentedContentTime: CFTimeInterval = 0
@@ -150,19 +165,22 @@ final class RendererCoordinator: NSObject {
     @MainActor
     func start() async throws {
         // Draw the clear colour while the stream spins up, as before.
-        view?.isPaused = false
+        startDisplayLink()
         do {
             try await captureService.start()
         } catch {
             pauseDrawing()
             throw error
         }
-        running = true
-        resetFrameState()
-        frameGenerationEngine.reset()
-        lastPresentHostTime = nil
-        smoothedPresentFrameTime = 1.0 / 60.0
-        dynamicScaleFactor = 1.0
+        renderLock.withLock {
+            running = true
+            firstFrameShown = false
+            resetFrameState()
+            frameGenerationEngine.reset()
+            lastPresentHostTime = nil
+            smoothedPresentFrameTime = 1.0 / 60.0
+            dynamicScaleFactor = 1.0
+        }
         let settings = settingsStore.snapshot()
         PipelineLog.shared.logSessionRunning(
             settings: settings,
@@ -174,7 +192,7 @@ final class RendererCoordinator: NSObject {
     @MainActor
     func stop() async {
         await captureService.stop()
-        running = false
+        renderLock.withLock { running = false }
         let settings = settingsStore.snapshot()
         PipelineLog.shared.flush(
             reason: "session stopped",
@@ -182,8 +200,10 @@ final class RendererCoordinator: NSObject {
             configuredCaptureFPS: captureConfiguration.framesPerSecond,
             targetPresentFPS: preferredPresentationFPS(for: settings)
         )
-        resetFrameState()
-        frameGenerationEngine.reset()
+        renderLock.withLock {
+            resetFrameState()
+            frameGenerationEngine.reset()
+        }
         pauseDrawing()
     }
 
@@ -191,10 +211,58 @@ final class RendererCoordinator: NSObject {
     /// instead of drawing the clear colour on the main thread at up to 120 fps.
     @MainActor
     private func pauseDrawing() {
-        guard let view, !view.isPaused else { return }
-        // Leave a clear frame behind, so the next start does not flash the last picture.
-        view.draw()
-        view.isPaused = true
+        guard let link = displayLink, let layer = view?.layer as? CAMetalLayer else { return }
+        displayLink = nil
+        let parts = UncheckedBox((link, layer, context.commandQueue))
+        RenderThread.shared.perform {
+            let (link, layer, queue) = parts.value
+            link.invalidate()
+            // Leave a clear frame behind, so the next start does not flash the last picture.
+            guard let drawable = layer.nextDrawable(),
+                  let commandBuffer = queue.makeCommandBuffer() else { return }
+            let pass = Self.renderPass(for: drawable)
+            commandBuffer.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
+        }
+    }
+
+    @MainActor
+    private func startDisplayLink() {
+        guard displayLink == nil, let view, let layer = view.layer as? CAMetalLayer else { return }
+        let screenFPS = view.window?.screen?.maximumFramesPerSecond ?? NSScreen.main?.maximumFramesPerSecond ?? 60
+        renderLock.withLock {
+            screenMaxFPS = screenFPS
+            linkFrameRate = 0
+        }
+        updateDrawableSize()
+        // CAMetalDisplayLink hands each callback a drawable and the exact time it will be on
+        // screen, about 41 ms ahead here whatever latency it is asked for. A plain display
+        // link with nextDrawable() got frames out 8 to 17 ms sooner, but blocked on the
+        // drawable, let 4 to 17 frames a second slip, and timed motion 5 to 10 times worse.
+        let link = CAMetalDisplayLink(metalLayer: layer)
+        link.delegate = self
+        link.preferredFrameLatency = 1
+        Self.apply(frameRate: preferredPresentationFPS(for: settingsStore.snapshot()), to: link)
+        displayLink = link
+        let box = UncheckedBox(link)
+        RenderThread.shared.perform {
+            box.value.add(to: .current, forMode: .default)
+        }
+    }
+
+    private static func apply(frameRate: Int, to link: CAMetalDisplayLink) {
+        let rate = Float(max(frameRate, 1))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: min(rate, 30), maximum: rate, preferred: rate)
+    }
+
+    private static func renderPass(for drawable: CAMetalDrawable) -> MTLRenderPassDescriptor {
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = clearColor
+        pass.colorAttachments[0].storeAction = .store
+        return pass
     }
 
     @MainActor
@@ -205,35 +273,56 @@ final class RendererCoordinator: NSObject {
 
     @MainActor
     func reconfigureCapture(configuration: CaptureConfiguration) async throws {
-        captureConfiguration = configuration
+        renderLock.withLock { captureConfiguration = configuration }
         try await captureService.reconfigure(configuration: configuration)
-        updateViewFPS()
-    }
-
-    @MainActor
-    private func updateViewFPS() {
-        guard let view = self.view else { return }
-        let settings = settingsStore.snapshot()
-        let targetFPS = preferredPresentationFPS(for: settings)
-        if view.preferredFramesPerSecond != targetFPS {
-            view.preferredFramesPerSecond = targetFPS
-        }
     }
 
     @MainActor
     private func configure(view: MTKView) {
         view.device = context.device
         view.colorPixelFormat = .bgra8Unorm
-        view.clearColor = MTLClearColor(red: 0.06, green: 0.07, blue: 0.08, alpha: 1.0)
+        view.clearColor = Self.clearColor
         view.framebufferOnly = false
-        // IMPORTANT: Start at 120fps to ensure the render loop runs fast enough
-        // to display interpolated intermediate frames. The capture rate is separate.
-        let initialSettings = settingsStore.snapshot()
-        view.preferredFramesPerSecond = preferredPresentationFPS(for: initialSettings)
+        // The view only hosts the Metal layer and keeps its drawable sized to the window.
+        // Frames come from the display link (`startDisplayLink`), never from MTKView itself.
         view.enableSetNeedsDisplay = false
-        // Paused until a session starts; `start()` and `stop()` switch it.
         view.isPaused = true
-        view.delegate = self
+        // MTKView only resizes its drawable while it draws itself. Paused, the drawable stayed
+        // at its first size (2560x1600) and the layer stretched it to the window.
+        view.autoResizeDrawable = false
+        view.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(viewGeometryChanged(_:)),
+            name: NSView.frameDidChangeNotification, object: view
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(viewGeometryChanged(_:)),
+            name: NSWindow.didChangeBackingPropertiesNotification, object: nil
+        )
+        updateDrawableSize()
+    }
+
+    @MainActor @objc
+    private func viewGeometryChanged(_ notification: Notification) {
+        if let window = notification.object as? NSWindow, window !== view?.window {
+            return
+        }
+        updateDrawableSize()
+    }
+
+    /// One drawable pixel per screen pixel of the overlay. Changed under the render lock, so a
+    /// frame is never drawn halfway through a resize.
+    @MainActor
+    private func updateDrawableSize() {
+        guard let view else { return }
+        let backing = view.convertToBacking(view.bounds).size
+        let size = CGSize(width: max(1, backing.width.rounded()), height: max(1, backing.height.rounded()))
+        // Set on the layer itself: MTKView passes its own `drawableSize` on only when it draws.
+        guard let layer = view.layer as? CAMetalLayer, layer.drawableSize != size else { return }
+        renderLock.withLock { layer.drawableSize = size }
+        if running {
+            PipelineLog.shared.event("output", "drawable \(Int(size.width))x\(Int(size.height)), one pixel per screen pixel")
+        }
     }
 
     private func installCaptureCallbacks() {
@@ -241,17 +330,12 @@ final class RendererCoordinator: NSObject {
             guard let self else { return }
 
             let arrival = CACurrentMediaTime()
-            self.frameLock.lock()
-            self.latestFrame = frame
-            self.latestFrameArrival = arrival
-            self.latestFrameSequence &+= 1
-            self.frameLock.unlock()
-
             self.statsLock.lock()
             self.rawCaptureFrameCounter += 1
             self.statsLock.unlock()
 
             self.onGeometryUpdate?(frame.targetRect)
+            self.ingest(frame: frame, arrival: arrival)
         }
 
         captureService.onError = { [weak self] error in
@@ -265,27 +349,33 @@ final class RendererCoordinator: NSObject {
                     targetPresentFPS: self.preferredPresentationFPS(for: settings)
                 )
             }
-            self?.running = false
+            if let self {
+                self.renderLock.withLock { self.running = false }
+            }
             self?.onError?(error)
         }
     }
 
-    private func snapshotLatestFrame() -> (frame: CapturedFrame, sequence: UInt64, arrival: CFTimeInterval)? {
-        frameLock.lock()
-        defer { frameLock.unlock() }
-        guard let latestFrame else {
-            return nil
+    /// Stages a captured frame as soon as it arrives, on the capture queue. Its optical flow
+    /// then starts up to a refresh sooner than when frames waited for the next draw, and
+    /// output can trail capture by that much less.
+    private func ingest(frame: CapturedFrame, arrival: CFTimeInterval) {
+        renderLock.lock()
+        defer { renderLock.unlock() }
+        guard running, let commandBuffer = context.commandQueue.makeCommandBuffer() else { return }
+        let settings = settingsStore.snapshot()
+        if stageCurrentFrameTexture(
+            commandBuffer: commandBuffer,
+            frame: frame,
+            arrival: arrival,
+            frameGenerationEnabled: settings.frameGenerationEnabled
+        ) != nil {
+            lastInputTexture = frame.texture
         }
-        return (latestFrame, latestFrameSequence, latestFrameArrival)
+        commandBuffer.commit()
     }
 
     private func resetFrameState() {
-        frameLock.lock()
-        latestFrame = nil
-        latestFrameSequence = 0
-        processedFrameSequence = 0
-        frameLock.unlock()
-
         upscaledScratchTexture = nil
         secondaryUpscaledScratchTexture = nil
         stagedFrameTextures = Array(repeating: nil, count: Self.stagingSlots)
@@ -293,8 +383,8 @@ final class RendererCoordinator: NSObject {
         bufferedFrames.removeAll()
         captureInterval = 1.0 / Double(max(captureConfiguration.framesPerSecond, 1))
         recentCaptureIntervals.removeAll()
+        cadence.reset()
         presentationDelay = 0
-        presentClock.reset()
         lastShownFrameID = nil
         currentFrameTexture = nil
         lastInputTexture = nil
@@ -587,7 +677,13 @@ fragment float4 fragmentPresent(
             to: writeTexture
         )
 
-        var time = latestCaptureTime
+        var time = cadence.time(for: latestCaptureTime)
+        PipelineLog.shared.noteTiming(
+            cadence.isLocked ? "frame moved to beat" : "frame off beat",
+            milliseconds: (latestCaptureTime - time) * 1000
+        )
+        PipelineLog.shared.noteTiming("picture behind source", milliseconds: presentationDelay * 1000)
+        PipelineLog.shared.noteTiming("flow ready after frame", milliseconds: frameGenerationEngine.flowReadyLatency * 1000)
         if let newest = bufferedFrames.last {
             time = max(time, newest.time + 0.001)
             let delta = time - newest.time
@@ -611,11 +707,19 @@ fragment float4 fragmentPresent(
             time: time,
             commandBuffer: commandBuffer
         )
-        if let flowFrame, let previousFlowFrame = bufferedFrames.last?.flowFrame {
+        if frame.startsNewShot {
+            PipelineLog.shared.noteTiming("cuts between shots", milliseconds: 0)
+        } else if let flowFrame, let previousFlowFrame = bufferedFrames.last?.flowFrame {
             frameGenerationEngine.requestFlow(previous: previousFlowFrame, next: flowFrame, after: commandBuffer)
         }
 
-        bufferedFrames.append(BufferedFrame(slot: slot, id: nextFrameID, time: time, flowFrame: flowFrame))
+        bufferedFrames.append(BufferedFrame(
+            slot: slot,
+            id: nextFrameID,
+            time: time,
+            flowFrame: flowFrame,
+            newShot: frame.startsNewShot
+        ))
         if bufferedFrames.count > Self.stagingSlots {
             bufferedFrames.removeFirst(bufferedFrames.count - Self.stagingSlots)
         }
@@ -701,7 +805,10 @@ fragment float4 fragmentPresent(
             // In match mode, keep fit-to-window as the base and allow manualScale
             // as a multiplicative bias so user changes always have visible effect.
             let fitScale = max(0.5, min(min(scaleX, scaleY), 3.0))
-            baseScale = max(0.5, min(fitScale * manualScale, 3.0))
+            // The factor can lower the output below the fit (cheaper), but never above it:
+            // pixels past the drawable are rendered, then thrown away when drawn. On a
+            // full-screen 4× session that was about a third of the GPU's work per frame.
+            baseScale = max(0.5, min(fitScale * manualScale, fitScale))
         } else {
             baseScale = manualScale
         }
@@ -819,15 +926,19 @@ fragment float4 fragmentPresent(
         // the displayed moment is already captured and usually already has its own flow.
         // The ring only reaches a few captures back, which caps the delay.
         let flowLatency = min(max(frameGenerationEngine.flowReadyLatency, 0), 0.05)
-        let targetDelay = min(captureInterval + flowLatency + 0.004, captureInterval * Double(Self.stagingSlots - 2))
-        // Any change in delay shows up as a change in speed, so it only drifts slowly
-        // (about 3% of real time) unless it is far off.
-        if presentationDelay == 0 || abs(targetDelay - presentationDelay) > 0.03 {
+        // The frame is timed for when it reaches the screen, which is this far from now.
+        // Those captures do not exist yet, so the delay also covers the lead.
+        let lead = min(max(targetPresentTime - CACurrentMediaTime(), 0), 0.1)
+        let targetDelay = min(captureInterval + flowLatency + 0.004, captureInterval * Double(Self.stagingSlots - 2)) + lead
+        // Any change in delay shows up as a change in speed, so it only drifts: up by at most
+        // 3% of real time when frames are coming in late, down by 1% when there is room. A
+        // jump, which the old rule made whenever the target moved 30 ms, is a visible skip.
+        if presentationDelay == 0 || abs(targetDelay - presentationDelay) > 0.15 {
             presentationDelay = targetDelay
         } else {
-            presentationDelay += min(max(targetDelay - presentationDelay, -0.00025), 0.00025)
+            presentationDelay += min(max(targetDelay - presentationDelay, -0.0001), 0.00025)
         }
-        let displayTime = presentClock.alignedNow(period: 1.0 / Double(max(1, preferredScreenRate))) - presentationDelay
+        let displayTime = targetPresentTime - presentationDelay
 
         guard let index = bufferedFrames.lastIndex(where: { $0.time <= displayTime }),
               index < bufferedFrames.count - 1 else {
@@ -842,6 +953,15 @@ fragment float4 fragmentPresent(
               let newerTexture = stagedFrameTextures[newer.slot] else {
             PipelineLog.shared.notePresent(.passthrough)
             return (currentTexture, currentTexture, 0.0, false)
+        }
+
+        // A cut, or two frames the motion search could not relate at all (a flash, a jump, a
+        // cut the brightness check missed): hold the old picture until the new one's moment,
+        // as the video itself does. Building frames between them only warps two unrelated
+        // pictures into each other.
+        if startsNewShot(older, newer) {
+            presentedContentTime = older.time
+            return presentCapturedFrame(older) ?? (olderTexture, olderTexture, 0.0, false)
         }
 
         presentedContentTime = displayTime
@@ -859,9 +979,12 @@ fragment float4 fragmentPresent(
             commandBuffer: commandBuffer,
             previous: GenerationFrame(texture: olderTexture, id: older.id),
             next: GenerationFrame(texture: newerTexture, id: newer.id),
-            t: t
+            t: t,
+            shotStartID: shotStart(atOrBefore: older.id),
+            artifactGuard: settings.artifactGuard
         ) {
         case .produced(let interpolated, let flowWidth, let flowHeight, let flowFrameID, let latestCaptureID):
+            noteDifficulty(olderID: older.id, newerID: newer.id, artifactGuard: settings.artifactGuard)
             PipelineLog.shared.notePresent(.flow(
                 t: t,
                 flowWidth: flowWidth,
@@ -874,6 +997,60 @@ fragment float4 fragmentPresent(
             PipelineLog.shared.notePresent(.blend(t: t, reason: reason))
             return (olderTexture, newerTexture, t, true)
         }
+    }
+
+    /// Logs once per pair how much of it no motion fits, and how far the artifact guard drew
+    /// its in-betweens toward the real frames (the shader applies the same curve).
+    private func noteDifficulty(olderID: UInt64, newerID: UInt64, artifactGuard: ArtifactGuard) {
+        guard !measuredPairs.contains(newerID),
+              let share = frameGenerationEngine.pairDifficulty(previousID: olderID, nextID: newerID) else { return }
+        measuredPairs.insert(newerID)
+        if measuredPairs.count > 64 {
+            measuredPairs.remove(measuredPairs.min()!)
+        }
+        PipelineLog.shared.noteTiming("hard-to-follow area %", milliseconds: share * 100)
+        if let range = artifactGuard.calmRange {
+            let x = min(max((share - Double(range.from)) / Double(range.full - range.from), 0), 1)
+            PipelineLog.shared.noteTiming("calmed toward real frames %", milliseconds: x * x * (3 - 2 * x) * 100)
+        }
+    }
+
+    private func startsNewShot(_ older: BufferedFrame, _ newer: BufferedFrame) -> Bool {
+        if newer.newShot {
+            return true
+        }
+        let unrelated = frameGenerationEngine.framesUnrelated(previousID: older.id, nextID: newer.id)
+        guard let unrelated else {
+            return false
+        }
+        // Logged once per pair: this runs for every pair each time output looks for a shot start.
+        if !judgedPairs.contains(newer.id) {
+            judgedPairs.insert(newer.id)
+            if judgedPairs.count > 64 {
+                judgedPairs.remove(judgedPairs.min()!)
+            }
+            if let share = frameGenerationEngine.unmatchedShare(previousID: older.id, nextID: newer.id) {
+                PipelineLog.shared.noteTiming("unmatched detail %", milliseconds: share * 100)
+            }
+            if unrelated {
+                PipelineLog.shared.noteTiming("frames with nothing in common", milliseconds: 0)
+            }
+        }
+        return unrelated
+    }
+
+    /// The first frame of the shot that `id` belongs to, so motion is never borrowed across a cut.
+    private func shotStart(atOrBefore id: UInt64) -> UInt64 {
+        var start: UInt64 = 0
+        for index in bufferedFrames.indices.dropFirst() where bufferedFrames[index].id <= id {
+            if startsNewShot(bufferedFrames[index - 1], bufferedFrames[index]) {
+                start = bufferedFrames[index].id
+            }
+        }
+        if let first = bufferedFrames.first, first.newShot, first.id <= id {
+            start = max(start, first.id)
+        }
+        return start
     }
 
     private func presentCapturedFrame(
@@ -931,12 +1108,14 @@ fragment float4 fragmentPresent(
     }
 }
 
-extension RendererCoordinator: MTKViewDelegate {
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        _ = size
+extension RendererCoordinator: CAMetalDisplayLinkDelegate {
+    func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
+        renderLock.lock()
+        defer { renderLock.unlock() }
+        render(drawable: update.drawable, targetTime: update.targetPresentationTimestamp, link: link)
     }
 
-    func draw(in view: MTKView) {
+    private func render(drawable: CAMetalDrawable, targetTime: CFTimeInterval, link: CAMetalDisplayLink) {
         let drawStart = CACurrentMediaTime()
         defer {
             if running {
@@ -950,10 +1129,16 @@ extension RendererCoordinator: MTKViewDelegate {
             }
         }
 
-        guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
-              let drawable = view.currentDrawable,
-              let renderPassDescriptor = view.currentRenderPassDescriptor else {
+        guard let commandBuffer = context.commandQueue.makeCommandBuffer() else {
             return
+        }
+        let renderPassDescriptor = Self.renderPass(for: drawable)
+        let drawableSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
+        targetPresentTime = targetTime
+        if running {
+            commandBuffer.addCompletedHandler { buffer in
+                PipelineLog.shared.noteGPUTime(milliseconds: (buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
+            }
         }
 
         updatePresentFrameTime()
@@ -970,27 +1155,9 @@ extension RendererCoordinator: MTKViewDelegate {
         let settings = settingsStore.snapshot()
         
         let targetFPS = preferredPresentationFPS(for: settings)
-        if view.preferredFramesPerSecond != targetFPS {
-            view.preferredFramesPerSecond = targetFPS
-        }
-
-        let frameSnapshot = snapshotLatestFrame()
-        if let frameSnapshot, frameSnapshot.sequence != processedFrameSequence {
-            if stageCurrentFrameTexture(
-                commandBuffer: commandBuffer,
-                frame: frameSnapshot.frame,
-                arrival: frameSnapshot.arrival,
-                frameGenerationEnabled: settings.frameGenerationEnabled
-            ) != nil {
-                processedFrameSequence = frameSnapshot.sequence
-                lastInputTexture = frameSnapshot.frame.texture
-
-                lastEffectiveScale = effectiveScale(
-                    for: settings,
-                    inputTexture: frameSnapshot.frame.texture,
-                    drawableSize: view.drawableSize
-                )
-            }
+        if linkFrameRate != targetFPS {
+            linkFrameRate = targetFPS
+            Self.apply(frameRate: targetFPS, to: link)
         }
 
         guard let presentation = resolvePresentationTextures(
@@ -1006,12 +1173,20 @@ extension RendererCoordinator: MTKViewDelegate {
             return
         }
 
+        if !firstFrameShown {
+            firstFrameShown = true
+            PipelineLog.shared.event("output", "first frame drawn, overlay shown")
+            let callback = onFirstFrame
+            Task { @MainActor in callback?() }
+        }
+
         // Now upscale the presentation textures (either the real frame or the generated frame)
         let scale = effectiveScale(
             for: settings,
             inputTexture: presentation.primary,
-            drawableSize: view.drawableSize
+            drawableSize: drawableSize
         )
+        lastEffectiveScale = scale
         
         let primaryUpscale = upscaleIfNeeded(
             commandBuffer: commandBuffer,
@@ -1067,7 +1242,7 @@ extension RendererCoordinator: MTKViewDelegate {
         lastOutputTexture = finalPrimary
 
         var uniforms = PresentUniforms(
-            contentScale: presentationScale(sourceTexture: finalPrimary, drawableSize: view.drawableSize),
+            contentScale: presentationScale(sourceTexture: finalPrimary, drawableSize: drawableSize),
             texelSize: SIMD2<Float>(
                 1.0 / Float(max(1, finalPrimary.width)),
                 1.0 / Float(max(1, finalPrimary.height))
@@ -1097,12 +1272,13 @@ extension RendererCoordinator: MTKViewDelegate {
         )
 
         let contentTime = presentedContentTime
-        let screenFPS = view.window?.screen?.maximumFramesPerSecond ?? targetFPS
+        let screenFPS = screenMaxFPS
         preferredScreenRate = min(targetFPS, screenFPS)
         let expectedInterval = 1.0 / Double(max(1, preferredScreenRate))
-        let clock = presentClock
         drawable.addPresentedHandler { presented in
-            clock.notePresented(presented.presentedTime)
+            if presented.presentedTime > 0 {
+                PipelineLog.shared.noteTiming("drawn to screen", milliseconds: (presented.presentedTime - drawStart) * 1000)
+            }
             PipelineLog.shared.notePresented(
                 presentedTime: presented.presentedTime,
                 contentTime: contentTime,
@@ -1114,32 +1290,122 @@ extension RendererCoordinator: MTKViewDelegate {
     }
 }
 
-/// Tracks when drawables actually reach the screen, so output time can follow the display's
-/// refresh grid instead of whenever the draw callback happened to run.
-private final class PresentClock: @unchecked Sendable {
-    private let lock = NSLock()
-    private var lastPresented: CFTimeInterval = 0
+/// One thread with a run loop, where the display link fires and frames are drawn.
+private final class RenderThread: @unchecked Sendable {
+    static let shared = RenderThread()
 
-    func notePresented(_ time: CFTimeInterval) {
-        guard time > 0 else { return }
-        lock.lock()
-        lastPresented = time
-        lock.unlock()
+    private let runLoop: CFRunLoop
+
+    private init() {
+        final class Box: @unchecked Sendable { var loop: CFRunLoop? }
+        let box = Box()
+        let ready = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            box.loop = CFRunLoopGetCurrent()
+            // A source with nothing to do keeps the run loop alive between display links.
+            var context = CFRunLoopSourceContext()
+            let keepAlive = CFRunLoopSourceCreate(nil, 0, &context)
+            CFRunLoopAddSource(CFRunLoopGetCurrent(), keepAlive, .defaultMode)
+            ready.signal()
+            while true {
+                CFRunLoopRunInMode(.defaultMode, 1.0e10, false)
+            }
+        }
+        thread.name = "MetalDuck render"
+        thread.qualityOfService = .userInteractive
+        thread.start()
+        ready.wait()
+        runLoop = box.loop!
     }
 
-    func reset() {
-        lock.lock()
-        lastPresented = 0
-        lock.unlock()
+    func perform(_ block: @escaping @Sendable () -> Void) {
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, block)
+        CFRunLoopWakeUp(runLoop)
+    }
+}
+
+/// Hands Metal and Core Animation objects to the render thread. Each is used there only.
+private final class UncheckedBox<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
+/// Video plays at a fixed rate, but a browser puts its frames on screen a little early or late:
+/// Firefox showed a 24 fps video 27 to 69 ms apart. Each frame still moves the picture by one
+/// frame period, so timing frames by their capture stamps made the motion speed up and slow
+/// down. While the stamps fit a steady beat, frames are placed on it instead, and the beat
+/// follows the stamps slowly. Sources without a steady rate keep their own stamps.
+struct CadenceTracker {
+    private(set) var period: Double = 0
+    private(set) var isLocked = false
+    private var intervals: [Double] = []
+    private var lastRaw: Double?
+    private var lastTime: Double?
+
+    mutating func reset() {
+        self = CadenceTracker()
     }
 
-    /// Now, snapped to the nearest refresh of the grid the last presented frame sat on.
-    func alignedNow(period: Double) -> CFTimeInterval {
-        let now = CACurrentMediaTime()
-        lock.lock()
-        let anchor = lastPresented
-        lock.unlock()
-        guard anchor > 0, period > 0, now - anchor < 1 else { return now }
-        return anchor + ((now - anchor) / period).rounded() * period
+    mutating func time(for raw: Double) -> Double {
+        defer { lastRaw = raw }
+        guard let previousRaw = lastRaw, let previousTime = lastTime else {
+            lastTime = raw
+            return raw
+        }
+        let interval = raw - previousRaw
+        // A long gap means the source was idle; start the beat again from this frame.
+        guard interval > 0, interval < 0.25 else {
+            intervals.removeAll()
+            isLocked = false
+            lastTime = max(raw, previousTime + 0.001)
+            return lastTime!
+        }
+        intervals.append(interval)
+        if intervals.count > 48 {
+            intervals.removeFirst(intervals.count - 48)
+        }
+        updatePeriod()
+
+        guard isLocked else {
+            lastTime = max(raw, previousTime + 0.001)
+            return lastTime!
+        }
+        // Whole frame periods since the last frame. Up to 0.75 of a period late still counts
+        // as the next frame; more than that means the source skipped one.
+        let steps = max(1, ((raw - previousTime) / period + 0.25).rounded(.down))
+        let predicted = previousTime + steps * period
+        let error = raw - predicted
+        var time = predicted + error * 0.1
+        if error < -period * 0.5 {
+            time = raw
+        }
+        time = max(time, previousTime + 0.001)
+        lastTime = time
+        return time
+    }
+
+    private mutating func updatePeriod() {
+        guard intervals.count >= 8 else {
+            isLocked = false
+            return
+        }
+        let median = intervals.sorted()[intervals.count / 2]
+        var total = 0.0
+        var steps = 0.0
+        for interval in intervals {
+            total += interval
+            steps += max(1, (interval / median + 0.25).rounded(.down))
+        }
+        let estimate = total / steps
+        var deviation = 0.0
+        for interval in intervals {
+            let k = max(1, (interval / estimate + 0.25).rounded(.down))
+            deviation += abs(interval - k * estimate)
+        }
+        let spread = deviation / Double(intervals.count) / estimate
+        period = estimate
+        // Hysteresis, so a source near the limit does not flip between the two timings.
+        let limit = isLocked ? 0.3 : 0.22
+        isLocked = spread < limit && estimate > 1.0 / 250.0 && estimate < 0.1
     }
 }

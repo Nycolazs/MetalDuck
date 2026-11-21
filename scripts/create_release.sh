@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-1.3.1}"
+VERSION="${VERSION:-1.3.2}"
 SDKROOT_PATH="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || echo /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk)}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 

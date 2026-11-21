@@ -2,6 +2,23 @@
 
 All notable changes to the MetalDuck project will be documented in this file.
 
+## [1.3.2] - 2026-11-21
+
+Bug fixes for frame generation on full-screen video, found while watching films, trailers and anime with the Anime profile (30 fps capture, 4x, 120 Hz).
+
+### Fixed
+- **Lag and input delay.** Frames are now drawn on a render thread of their own, paced by `CAMetalDisplayLink`, so the main thread can no longer hold up the picture. The overlay stays hidden until the first frame is drawn, which fixes the black screen on Start and after Stop.
+- **Uneven motion on browser video.** Browsers repaint more often than the video changes (Firefox sent over 60 frames a second for a 24 fps trailer). Repeated pictures are now skipped, frames are placed on the video's steady beat, and the capture rate is applied on average, so 24 fps video stays evenly spaced.
+- **Mismatched frames at scene cuts.** Pairs of frames with nothing in common (cuts, flashes, jumps) are detected from the motion search and no frames are built between them. Flow is never borrowed across a cut.
+- **See-through copies of fast objects.** Vision's flow barely sees an object crossing a still background. A block search on the GPU now follows moves up to about 320 px between frames, and uses them only where Vision is clearly wrong.
+- **Halos and ghost edges around people and other large moving objects, at any speed.** In-between frames now carry the motion of both captures to the moment being built (splatting), so each spot knows which capture sees it. Background a person has just uncovered is no longer dragged along with them. On a test with a large walking figure the figure area improved by 2.5 to 3 dB, and real footage improved in all 18 tests. Cost: about 0.4 ms of GPU per in-between frame.
+- **Block-shaped tears next to fast objects.** The check that lets a pixel use a nearby block's motion is stricter, and a block's motion no longer replaces the main motion unless that clearly fits better.
+- **Tears and doubling in fast action and anime.** New Artifact guard setting (Off, Balanced, Strong) in the Frame Generation panel. For each pair, the GPU measures how much of the picture no known motion fits, and draws the hard pairs closer to the nearest real frame. Normal footage is not affected. Balanced is the default; Profiles saved earlier load with it on.
+
+### Interface
+- The Frame Generation panel has the Artifact guard row. The two columns of the control panel keep their own height, so the group titles no longer drift.
+- The Monitor log records the artifact guard level, how hard each pair was, and how far it was calmed.
+
 ## [1.3.1] - 2026-11-20
 
 ### Interface

@@ -55,6 +55,7 @@ final class VisionFlowProvider: @unchecked Sendable {
     private var pending: (FlowFrame, FlowFrame)?
     private var generation: UInt64 = 0
     private var readyLatency: Double = 0.03
+    private var recentReadyLatencies: [Double] = []
 
     init(device: MTLDevice, commandQueue: MTLCommandQueue) {
         self.device = device
@@ -186,7 +187,14 @@ final class VisionFlowProvider: @unchecked Sendable {
                     }
                     let latency = finished - next.time
                     if latency > 0, latency < 0.5 {
-                        self.readyLatency = self.readyLatency * 0.85 + latency * 0.15
+                        // A high percentile, not the average: output waits this long, and a
+                        // pair that comes in later than that is drawn without its own flow.
+                        self.recentReadyLatencies.append(latency)
+                        if self.recentReadyLatencies.count > 24 {
+                            self.recentReadyLatencies.removeFirst(self.recentReadyLatencies.count - 24)
+                        }
+                        let sorted = self.recentReadyLatencies.sorted()
+                        self.readyLatency = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.9))]
                     }
                 }
                 following = self.pending
