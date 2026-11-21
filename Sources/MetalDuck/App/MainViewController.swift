@@ -190,6 +190,15 @@ final class MainViewController: NSViewController {
             PipelineLog.shared.event("session", "stop from the menu bar")
             self.controlPanelDidPressStop(self.controlPanel)
         }
+        menuBar.onCaptureCardSelected = { [weak self] card in
+            guard let self else { return }
+            if !self.videoDevices.contains(where: { $0.id == card.id }) {
+                self.videoDevices.append(card)
+            }
+            self.selectedVideoDeviceID = card.id
+            self.controlPanel.setCaptureMode(.videoDevice)
+            self.controlPanel(self.controlPanel, didSelectCaptureMode: .videoDevice)
+        }
         menuBar.onShowWindow = { [weak self] in
             guard let window = self?.view.window else { return }
             window.makeKeyAndOrderFront(nil)
@@ -413,6 +422,7 @@ final class MainViewController: NSViewController {
 
     private func applyCaptureTargetSelection() {
         let target = selectedCaptureTarget()
+        menuBar.selectedCaptureCardID = selectedCaptureMode == .videoDevice ? selectedVideoDeviceID : nil
 
         Task { [weak self] in
             guard let self else { return }

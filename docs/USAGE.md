@@ -33,7 +33,8 @@ translation run on the Mac. Text and frames are held in memory during the sessio
 Use the packaged **MetalDuck.app** with a USB capture card that macOS exposes
 as an external video device (for example, a UVC HDMI capture card). Connect the
 card and HDMI source, select **Card** under Capture Mode, refresh sources if
-needed, and choose the device by name. Allow Camera access when macOS asks.
+needed, and choose the device by name. You can also select a device from
+**Capture Card** in the MetalDuck menu bar. Allow Camera access when macOS asks.
 Start scaling as usual. The video opens on the control window's display and
 uses the same upscaling, frame generation, and Turkish subtitle controls.
 

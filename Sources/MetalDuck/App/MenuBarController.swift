@@ -8,6 +8,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onStop: (() -> Void)?
     var onShowWindow: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onCaptureCardSelected: ((VideoCaptureSource) -> Void)?
+    var selectedCaptureCardID: String?
     var onSubtitleLanguage: ((String?) -> Void)?
     var onToggleWholeFrameOCR: (() -> Void)?
     var subtitleLanguage: String?
@@ -30,7 +32,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         // An empty menu is parked offscreen by the menu bar. Fill it before assigning.
-        rebuild(menu)
+        rebuild(menu, cards: [])
         if let button = statusItem.button {
             button.image = symbol("play.rectangle", pointSize: 15)
             button.setAccessibilityLabel("MetalDuck")
@@ -52,10 +54,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     func menuWillOpen(_ menu: NSMenu) {
-        rebuild(menu)
+        rebuild(menu, cards: VideoDeviceCaptureService.sources())
     }
 
-    private func rebuild(_ menu: NSMenu) {
+    private func rebuild(_ menu: NSMenu, cards: [VideoCaptureSource]) {
         menu.removeAllItems()
 
         let title = NSMenuItem(title: "MetalDuck", action: nil, keyEquivalent: "")
@@ -87,6 +89,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         shortcut.isEnabled = false
         menu.addItem(shortcut)
         menu.addItem(.separator())
+
+        let captureCard = NSMenuItem(title: "Capture Card", action: nil, keyEquivalent: "")
+        let cardMenu = NSMenu()
+        for card in cards {
+            let item = NSMenuItem(title: card.title, action: #selector(selectCaptureCard(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = card
+            item.state = card.id == selectedCaptureCardID ? .on : .off
+            cardMenu.addItem(item)
+        }
+        if cards.isEmpty {
+            cardMenu.addItem(NSMenuItem(title: "Harici video cihazı bulunamadı", action: nil, keyEquivalent: ""))
+        }
+        captureCard.submenu = cardMenu
+        menu.addItem(captureCard)
 
         let subtitles = NSMenuItem(title: "Türkçe Altyazı", action: nil, keyEquivalent: "")
         let choices = NSMenu()
@@ -129,6 +146,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             .withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium))
         image?.isTemplate = true
         return image
+    }
+
+    @objc private func selectCaptureCard(_ item: NSMenuItem) {
+        guard let card = item.representedObject as? VideoCaptureSource else { return }
+        onCaptureCardSelected?(card)
     }
 
     @objc private func selectSubtitleLanguage(_ item: NSMenuItem) {
