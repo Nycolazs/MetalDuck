@@ -16,9 +16,9 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onCaptureCardSelected: ((VideoCaptureSource) -> Void)?
     var selectedCaptureCardID: String?
     var onSubtitleLanguage: ((String?) -> Void)?
-    var onToggleWholeFrameOCR: (() -> Void)?
+    var onSelectSubtitleRegion: (() -> Void)?
     var subtitleLanguage: String?
-    var wholeFrameOCR = false
+    var hasSubtitleRegion = false
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private var isRunning = false
@@ -120,10 +120,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             choices.addItem(item)
         }
         choices.addItem(.separator())
-        let wholeFrame = NSMenuItem(title: "Tüm Görüntüyü Tara", action: #selector(toggleWholeFrameOCR), keyEquivalent: "")
-        wholeFrame.target = self
-        wholeFrame.state = wholeFrameOCR ? .on : .off
-        choices.addItem(wholeFrame)
+        let area = NSMenuItem(title: hasSubtitleRegion ? "Alanı değiştir…" : "Alan seç…",
+                              action: #selector(selectSubtitleRegion), keyEquivalent: "")
+        area.target = self
+        choices.addItem(area)
         subtitles.submenu = choices
         menu.addItem(subtitles)
 
@@ -158,8 +158,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         onSubtitleLanguage?(item.representedObject as? String)
     }
 
-    @objc private func toggleWholeFrameOCR() {
-        onToggleWholeFrameOCR?()
+    @objc private func selectSubtitleRegion() {
+        onSelectSubtitleRegion?()
     }
 
     @objc private func handleStop() {

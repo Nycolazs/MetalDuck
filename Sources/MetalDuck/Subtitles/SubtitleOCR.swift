@@ -1,3 +1,4 @@
+import CoreImage
 import CoreVideo
 import Foundation
 import Vision
@@ -8,16 +9,27 @@ struct SubtitleImage: @unchecked Sendable {
 }
 
 enum SubtitleOCR {
-    static func recognize(_ image: SubtitleImage, language: String, wholeFrame: Bool) throws -> String {
+    private static let context = CIContext()
+
+    static func recognize(_ image: SubtitleImage, language: String, region: CGRect) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = [language]
         request.usesLanguageCorrection = true
-        // Vision uses a bottom-left origin. Restrict OCR to the usual dialogue area.
-        if !wholeFrame {
-            request.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 0.4)
-        }
-        try VNImageRequestHandler(cvPixelBuffer: image.pixelBuffer, orientation: .up).perform([request])
+        let source = CIImage(cvPixelBuffer: image.pixelBuffer)
+        let extent = source.extent
+        let selection = CGRect(
+            x: extent.minX + region.minX * extent.width,
+            y: extent.minY + region.minY * extent.height,
+            width: region.width * extent.width,
+            height: region.height * extent.height
+        )
+        // Round inward so Vision never receives pixels beyond the selected area.
+        let crop = CGRect(x: ceil(selection.minX), y: ceil(selection.minY),
+                          width: floor(selection.maxX) - ceil(selection.minX),
+                          height: floor(selection.maxY) - ceil(selection.minY)).intersection(extent)
+        guard !crop.isEmpty, let pixels = context.createCGImage(source, from: crop) else { return "" }
+        try VNImageRequestHandler(cgImage: pixels, orientation: .up).perform([request])
 
         return (request.results ?? [])
             .compactMap { observation -> (text: String, bounds: CGRect)? in

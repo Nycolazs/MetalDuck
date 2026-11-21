@@ -116,9 +116,9 @@ final class ControlPanelView: NSView {
     private let sourcePicker = NSStackView()
     private let captureCursorSwitch = GlassSwitch()
     private let subtitleLanguageDropdown = CompactDropdown()
-    private let wholeFrameOCRSwitch = GlassSwitch()
+    private let subtitleRegionButton = NSButton(title: "Alan seç…", target: nil, action: nil)
     var onSubtitleLanguage: ((String?) -> Void)?
-    var onToggleWholeFrameOCR: (() -> Void)?
+    var onSelectSubtitleRegion: (() -> Void)?
     private let captureFPSSlider = NSSlider(value: 30, minValue: 15, maxValue: 120, target: nil, action: nil)
     private let captureFPSValueLabel = NSTextField(labelWithString: "30")
     private let queueDepthSlider = NSSlider(value: 5, minValue: 1, maxValue: 8, target: nil, action: nil)
@@ -336,14 +336,14 @@ final class ControlPanelView: NSView {
         settingsScroll.reflectScrolledClipView(settingsScroll.contentView)
     }
 
-    func setSubtitleSettings(language: String?, wholeFrame: Bool) {
+    func setSubtitleSettings(language: String?, hasRegion: Bool) {
         let index = MenuBarController.subtitleLanguages.firstIndex { $0.0 == language } ?? 0
         subtitleLanguageDropdown.selectItem(at: index)
-        wholeFrameOCRSwitch.isOn = wholeFrame
+        subtitleRegionButton.title = hasRegion ? "Alanı değiştir…" : "Alan seç…"
     }
 
-    @objc private func handleWholeFrameOCRChanged() {
-        onToggleWholeFrameOCR?()
+    @objc private func handleSelectSubtitleRegion() {
+        onSelectSubtitleRegion?()
     }
 
     func setHUDVisible(_ visible: Bool) {
@@ -954,10 +954,10 @@ final class ControlPanelView: NSView {
         subtitleLanguageDropdown.onSelectionChanged = { [weak self] _, index in
             self?.onSubtitleLanguage?(subtitleLanguages[index].0)
         }
-        wholeFrameOCRSwitch.target = self
-        wholeFrameOCRSwitch.action = #selector(handleWholeFrameOCRChanged)
+        subtitleRegionButton.target = self
+        subtitleRegionButton.action = #selector(handleSelectSubtitleRegion)
         group.addRow(SettingRow.control("Kaynak dili", symbol: "character.bubble", control: subtitleLanguageDropdown))
-        group.addRow(SettingRow.control("Tüm görüntüyü tara", symbol: "viewfinder", control: wholeFrameOCRSwitch))
+        group.addRow(SettingRow.control("Okuma alanı", symbol: "viewfinder", control: subtitleRegionButton))
         return group
     }
 

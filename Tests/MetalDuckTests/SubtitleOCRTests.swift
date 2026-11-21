@@ -8,14 +8,22 @@ import Testing
 struct SubtitleOCRTests {
     @Test func dialogueAreaIgnoresTextAtTop() throws {
         let image = try makeFrame()
-        let result = try SubtitleOCR.recognize(image, language: "en", wholeFrame: false)
+        let result = try SubtitleOCR.recognize(image, language: "en", region: CGRect(x: 0, y: 0, width: 1, height: 0.4))
         #expect(result.contains("Open the gate"))
         #expect(!result.contains("Quest updated"))
     }
 
+    @Test func customRegionReadsOnlyTheSelectedText() throws {
+        let image = try makeFrame()
+        let result = try SubtitleOCR.recognize(
+            image, language: "en", region: CGRect(x: 0.15, y: 0.68, width: 0.5, height: 0.27)
+        )
+        #expect(result == "Quest updated")
+    }
+
     @Test func wholeFrameIncludesTextInReadingOrder() throws {
         let image = try makeFrame()
-        let result = try SubtitleOCR.recognize(image, language: "en", wholeFrame: true)
+        let result = try SubtitleOCR.recognize(image, language: "en", region: CGRect(x: 0, y: 0, width: 1, height: 1))
         #expect(result == "Quest updated\nOpen the gate")
     }
 
@@ -33,7 +41,7 @@ struct SubtitleOCRTests {
         #expect(frame.timestamp == timestamp)
         #expect(frame.texture.width == 960)
         #expect(frame.texture.height == 540)
-        let result = try SubtitleOCR.recognize(frame.subtitleImage, language: "en", wholeFrame: false)
+        let result = try SubtitleOCR.recognize(frame.subtitleImage, language: "en", region: CGRect(x: 0, y: 0, width: 1, height: 0.4))
         #expect(result == "Open the gate")
     }
 

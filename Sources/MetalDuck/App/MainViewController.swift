@@ -11,7 +11,7 @@ final class MainViewController: NSViewController {
     }
 
     private static let subtitleLanguageKey = "com.metalduck.subtitleLanguage"
-    private static let wholeFrameOCRKey = "com.metalduck.wholeFrameOCR"
+    private static let subtitleRegionKey = "com.metalduck.subtitleRegion"
 
     private static let showHUDKey = "com.metalduck.showHUD"
 
@@ -20,6 +20,7 @@ final class MainViewController: NSViewController {
     private let settingsStore = SettingsStore()
     private let profileManager = ProfileManager.shared
     private let overlayController: ScalingOverlayController
+    private var subtitleRegion: CGRect?
     private let subtitles = TurkishSubtitleController()
     private let menuBar = MenuBarController()
     private let outsideClickDismisser = OutsideClickDismisser()
@@ -126,12 +127,16 @@ final class MainViewController: NSViewController {
         setupShortcutManager()
         let defaults = UserDefaults.standard
         menuBar.subtitleLanguage = defaults.string(forKey: Self.subtitleLanguageKey)
-        menuBar.wholeFrameOCR = defaults.bool(forKey: Self.wholeFrameOCRKey)
+        if let data = defaults.data(forKey: Self.subtitleRegionKey),
+           let region = try? JSONDecoder().decode(CGRect.self, from: data),
+           !region.isEmpty, CGRect(x: 0, y: 0, width: 1, height: 1).contains(region) {
+            subtitleRegion = region
+        }
         syncSubtitleSettings()
         menuBar.onSubtitleLanguage = { [weak self] in self?.setSubtitleLanguage($0) }
         controlPanel.onSubtitleLanguage = menuBar.onSubtitleLanguage
-        menuBar.onToggleWholeFrameOCR = { [weak self] in self?.toggleWholeFrameOCR() }
-        controlPanel.onToggleWholeFrameOCR = menuBar.onToggleWholeFrameOCR
+        menuBar.onSelectSubtitleRegion = { [weak self] in self?.selectSubtitleRegion() }
+        controlPanel.onSelectSubtitleRegion = menuBar.onSelectSubtitleRegion
     }
 
     private func setSubtitleLanguage(_ language: String?) {
@@ -141,15 +146,23 @@ final class MainViewController: NSViewController {
         refreshSubtitles()
     }
 
-    private func toggleWholeFrameOCR() {
-        menuBar.wholeFrameOCR.toggle()
-        UserDefaults.standard.set(menuBar.wholeFrameOCR, forKey: Self.wholeFrameOCRKey)
+    private func selectSubtitleRegion() {
+        guard let frame = renderer.latestSubtitleFrame() else {
+            controlPanel.setStatus("Önce görüntüyü başlat, ardından OCR alanını seç.", isError: true)
+            return
+        }
+        guard let region = SubtitleRegionPicker.select(
+            in: frame.image, initialRegion: subtitleRegion, on: view.window?.screen
+        ) else { return }
+        subtitleRegion = region
+        UserDefaults.standard.set(try? JSONEncoder().encode(region), forKey: Self.subtitleRegionKey)
         syncSubtitleSettings()
         refreshSubtitles()
     }
 
     private func syncSubtitleSettings() {
-        controlPanel.setSubtitleSettings(language: menuBar.subtitleLanguage, wholeFrame: menuBar.wholeFrameOCR)
+        menuBar.hasSubtitleRegion = subtitleRegion != nil
+        controlPanel.setSubtitleSettings(language: menuBar.subtitleLanguage, hasRegion: subtitleRegion != nil)
     }
 
     private func clearSubtitles() {
@@ -164,9 +177,13 @@ final class MainViewController: NSViewController {
             overlayController.setSubtitle("Türkçe altyazı için macOS 26 veya üzeri gerekir.")
             return
         }
+        guard let subtitleRegion else {
+            overlayController.setSubtitle("Türkçe Altyazı → Alan seç… ile okunacak alanı belirle.")
+            return
+        }
         subtitles.start(
             language: language,
-            wholeFrame: menuBar.wholeFrameOCR,
+            region: subtitleRegion,
             nextFrame: { [weak self] in
                 self?.renderer.latestSubtitleFrame()
             },

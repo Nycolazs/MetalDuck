@@ -21,12 +21,13 @@ download Turkish and the selected source language. If prompted to download
 languages while scaling, select the source language again after they install.
 Available language pairs depend on the Apple Translation models on the Mac.
 
-Start scaling with the game window selected. MetalDuck reads text in the lower
-40% of the capture and shows the Turkish translation along the bottom of the
-overlay. Enable **Tüm Görüntüyü Tara** to include menus and text elsewhere in
-the window. For display capture, this includes any other visible apps in the
-scan area. Pick **Kapalı** to turn subtitles off. Screen recognition and
-translation run on the Mac. Text and frames are held in memory during the session.
+Start scaling with the game window or capture card selected. In the
+**Türkçe Altyazı (OCR)** card or menu, choose **Alan seç…** and drag a
+rectangle over the text in the capture preview. The selection is saved
+relative to the frame. OCR reads only inside that rectangle, and waits for
+a selection before scanning. Select **Alanı değiştir…** to draw it again.
+Pick **Kapalı** to turn subtitles off. Recognition and translation run on
+the Mac.
 
 ## Capture cards
 

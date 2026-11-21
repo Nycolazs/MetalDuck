@@ -13,7 +13,7 @@ final class TurkishSubtitleController {
     @available(macOS 26, *)
     func start(
         language: String,
-        wholeFrame: Bool,
+        region: CGRect,
         nextFrame: @escaping () -> (image: SubtitleImage, sequence: UInt64)?,
         show: @escaping (String) -> Void,
         report: @escaping (String) -> Void
@@ -49,7 +49,7 @@ final class TurkishSubtitleController {
                     lastSequence = frame.sequence
                     do {
                         let worker = Task.detached(priority: .utility) {
-                            try SubtitleOCR.recognize(frame.image, language: language, wholeFrame: wholeFrame)
+                            try SubtitleOCR.recognize(frame.image, language: language, region: region)
                         }
                         let text = try await worker.value
                         try Task.checkCancellation()
