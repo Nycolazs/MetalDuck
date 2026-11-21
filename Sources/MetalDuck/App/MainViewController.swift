@@ -126,18 +126,29 @@ final class MainViewController: NSViewController {
         let defaults = UserDefaults.standard
         menuBar.subtitleLanguage = defaults.string(forKey: Self.subtitleLanguageKey)
         menuBar.wholeFrameOCR = defaults.bool(forKey: Self.wholeFrameOCRKey)
-        menuBar.onSubtitleLanguage = { [weak self] language in
-            guard let self else { return }
-            self.menuBar.subtitleLanguage = language
-            defaults.set(language, forKey: Self.subtitleLanguageKey)
-            self.refreshSubtitles()
-        }
-        menuBar.onToggleWholeFrameOCR = { [weak self] in
-            guard let self else { return }
-            self.menuBar.wholeFrameOCR.toggle()
-            defaults.set(self.menuBar.wholeFrameOCR, forKey: Self.wholeFrameOCRKey)
-            self.refreshSubtitles()
-        }
+        syncSubtitleSettings()
+        menuBar.onSubtitleLanguage = { [weak self] in self?.setSubtitleLanguage($0) }
+        controlPanel.onSubtitleLanguage = menuBar.onSubtitleLanguage
+        menuBar.onToggleWholeFrameOCR = { [weak self] in self?.toggleWholeFrameOCR() }
+        controlPanel.onToggleWholeFrameOCR = menuBar.onToggleWholeFrameOCR
+    }
+
+    private func setSubtitleLanguage(_ language: String?) {
+        menuBar.subtitleLanguage = language
+        UserDefaults.standard.set(language, forKey: Self.subtitleLanguageKey)
+        syncSubtitleSettings()
+        refreshSubtitles()
+    }
+
+    private func toggleWholeFrameOCR() {
+        menuBar.wholeFrameOCR.toggle()
+        UserDefaults.standard.set(menuBar.wholeFrameOCR, forKey: Self.wholeFrameOCRKey)
+        syncSubtitleSettings()
+        refreshSubtitles()
+    }
+
+    private func syncSubtitleSettings() {
+        controlPanel.setSubtitleSettings(language: menuBar.subtitleLanguage, wholeFrame: menuBar.wholeFrameOCR)
     }
 
     private func clearSubtitles() {

@@ -4,6 +4,11 @@ import AppKit
 /// whether or not scaling is running, and Stop lives there.
 @MainActor
 final class MenuBarController: NSObject, NSMenuDelegate {
+    static let subtitleLanguages: [(String?, String)] = [
+        (nil, "Kapalı"), ("en", "İngilizce"), ("ja", "Japonca"), ("ko", "Korece"),
+        ("de", "Almanca"), ("fr", "Fransızca"), ("es", "İspanyolca")
+    ]
+
     var onStart: (() -> Void)?
     var onStop: (() -> Void)?
     var onShowWindow: (() -> Void)?
@@ -107,11 +112,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         let subtitles = NSMenuItem(title: "Türkçe Altyazı", action: nil, keyEquivalent: "")
         let choices = NSMenu()
-        let languages: [(String?, String)] = [
-            (nil, "Kapalı"), ("en", "İngilizce"), ("ja", "Japonca"), ("ko", "Korece"),
-            ("de", "Almanca"), ("fr", "Fransızca"), ("es", "İspanyolca")
-        ]
-        for (code, name) in languages {
+        for (code, name) in Self.subtitleLanguages {
             let item = NSMenuItem(title: name, action: #selector(selectSubtitleLanguage(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = code

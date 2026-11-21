@@ -114,6 +114,10 @@ final class ControlPanelView: NSView {
     private let autoSourceLabel = GlassLabel.make("Frontmost window, picked automatically", font: GlassFont.body, color: .secondaryLabelColor)
     private let sourcePicker = NSStackView()
     private let captureCursorSwitch = GlassSwitch()
+    private let subtitleLanguageDropdown = CompactDropdown()
+    private let wholeFrameOCRSwitch = GlassSwitch()
+    var onSubtitleLanguage: ((String?) -> Void)?
+    var onToggleWholeFrameOCR: (() -> Void)?
     private let captureFPSSlider = NSSlider(value: 30, minValue: 15, maxValue: 120, target: nil, action: nil)
     private let captureFPSValueLabel = NSTextField(labelWithString: "30")
     private let queueDepthSlider = NSSlider(value: 5, minValue: 1, maxValue: 8, target: nil, action: nil)
@@ -323,6 +327,16 @@ final class ControlPanelView: NSView {
         if let selectedIndex, titles.indices.contains(selectedIndex) {
             captureSourceDropdown.selectItem(at: selectedIndex)
         }
+    }
+
+    func setSubtitleSettings(language: String?, wholeFrame: Bool) {
+        let index = MenuBarController.subtitleLanguages.firstIndex { $0.0 == language } ?? 0
+        subtitleLanguageDropdown.selectItem(at: index)
+        wholeFrameOCRSwitch.isOn = wholeFrame
+    }
+
+    @objc private func handleWholeFrameOCRChanged() {
+        onToggleWholeFrameOCR?()
     }
 
     func setHUDVisible(_ visible: Bool) {
@@ -887,6 +901,15 @@ final class ControlPanelView: NSView {
         group.addRow(makeWideRow(icon: modeIcon, title: modeTitle, control: captureModeControl))
         group.addRow(makeWideRow(icon: sourceIcon, title: sourceTitleLabel, control: sourcePicker))
         configureSourcePicker()
+        let subtitleLanguages = MenuBarController.subtitleLanguages
+        subtitleLanguageDropdown.items = subtitleLanguages.map { $0.1 }
+        subtitleLanguageDropdown.onSelectionChanged = { [weak self] _, index in
+            self?.onSubtitleLanguage?(subtitleLanguages[index].0)
+        }
+        wholeFrameOCRSwitch.target = self
+        wholeFrameOCRSwitch.action = #selector(handleWholeFrameOCRChanged)
+        group.addRow(SettingRow.control("Türkçe Altyazı (OCR)", symbol: "text.viewfinder", control: subtitleLanguageDropdown))
+        group.addRow(SettingRow.control("Tüm görüntüyü tara", symbol: "viewfinder", control: wholeFrameOCRSwitch))
         group.addRow(SettingRow.control("Show cursor", symbol: "cursorarrow", control: captureCursorSwitch))
         group.addRow(SettingRow.slider("Capture rate", symbol: "timer", help: "Expected cadence of the source.", slider: captureFPSSlider, value: captureFPSValueLabel))
         group.addRow(SettingRow.slider("Queue depth", symbol: "square.stack.3d.up", help: "Buffered frames. Higher is steadier, lower has less latency.", slider: queueDepthSlider, value: queueDepthValueLabel))

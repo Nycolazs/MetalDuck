@@ -15,7 +15,7 @@ Capture, Output, and Generated in the top row are the live rates. The built-in p
 ## Turkish subtitles
 
 On macOS 26 or later, open the MetalDuck menu-bar icon and choose the game's
-text language under **Türkçe Altyazı**. The feature is off by default. In
+text language under **Türkçe Altyazı**. The main window also has **Türkçe Altyazı (OCR)** and **Tüm görüntüyü tara** controls under Capture. The feature is off by default. In
 **System Settings → General → Language & Region → Translation Languages**,
 download Turkish and the selected source language. If prompted to download
 languages while scaling, select the source language again after they install.
