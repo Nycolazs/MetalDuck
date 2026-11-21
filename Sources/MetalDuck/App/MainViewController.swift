@@ -10,6 +10,9 @@ final class MainViewController: NSViewController {
         let target: CaptureTarget
     }
 
+    private static let subtitleLanguageKey = "com.metalduck.subtitleLanguage"
+    private static let wholeFrameOCRKey = "com.metalduck.wholeFrameOCR"
+
     private static let showHUDKey = "com.metalduck.showHUD"
 
     private let controlPanel = ControlPanelView(frame: .zero)
@@ -17,6 +20,7 @@ final class MainViewController: NSViewController {
     private let settingsStore = SettingsStore()
     private let profileManager = ProfileManager.shared
     private let overlayController: ScalingOverlayController
+    private let subtitles = TurkishSubtitleController()
     private let menuBar = MenuBarController()
     private let outsideClickDismisser = OutsideClickDismisser()
 
@@ -114,6 +118,50 @@ final class MainViewController: NSViewController {
         overlayController.hide()
         updateWindowTitle()
         setupShortcutManager()
+        let defaults = UserDefaults.standard
+        menuBar.subtitleLanguage = defaults.string(forKey: Self.subtitleLanguageKey)
+        menuBar.wholeFrameOCR = defaults.bool(forKey: Self.wholeFrameOCRKey)
+        menuBar.onSubtitleLanguage = { [weak self] language in
+            guard let self else { return }
+            self.menuBar.subtitleLanguage = language
+            defaults.set(language, forKey: Self.subtitleLanguageKey)
+            self.refreshSubtitles()
+        }
+        menuBar.onToggleWholeFrameOCR = { [weak self] in
+            guard let self else { return }
+            self.menuBar.wholeFrameOCR.toggle()
+            defaults.set(self.menuBar.wholeFrameOCR, forKey: Self.wholeFrameOCRKey)
+            self.refreshSubtitles()
+        }
+    }
+
+    private func clearSubtitles() {
+        subtitles.stop()
+        overlayController.setSubtitle("")
+    }
+
+    private func refreshSubtitles(skippingCurrentFrame: Bool = false) {
+        clearSubtitles()
+        guard renderer.isRunning, let language = menuBar.subtitleLanguage else { return }
+        guard #available(macOS 26, *) else {
+            overlayController.setSubtitle("Türkçe altyazı için macOS 26 veya üzeri gerekir.")
+            return
+        }
+        let skippedSequence = skippingCurrentFrame ? renderer.latestSubtitleFrame()?.sequence : nil
+        subtitles.start(
+            language: language,
+            wholeFrame: menuBar.wholeFrameOCR,
+            nextFrame: { [weak self] in
+                guard let frame = self?.renderer.latestSubtitleFrame(),
+                      frame.sequence != skippedSequence else { return nil }
+                return frame
+            },
+            show: { [weak self] text in self?.overlayController.setSubtitle(text) },
+            report: { [weak self] message in
+                self?.overlayController.setSubtitle(message)
+                self?.controlPanel.setStatus(message, isError: true)
+            }
+        )
     }
 
     private func setupShortcutManager() {
@@ -194,6 +242,7 @@ final class MainViewController: NSViewController {
 
 
     func stop() async {
+        clearSubtitles()
         RunGuard.shared.disarm()
         await renderer.stop()
         DispatchQueue.main.async { [weak self] in
@@ -224,6 +273,7 @@ final class MainViewController: NSViewController {
     }
 
     private func handleRendererError(_ error: Error) {
+        clearSubtitles()
         if (error as? CaptureStaleError) == .framesStalled {
             let now = CACurrentMediaTime()
             if now - lastAutoRecoveryTime > 10.0 {
@@ -244,6 +294,7 @@ final class MainViewController: NSViewController {
                     try? await self.renderer.reconfigureCapture(target: target)
                     try? await self.renderer.reconfigureCapture(configuration: config)
                     try? await self.renderer.start()
+                    self.refreshSubtitles()
                 }
             } else {
                 controlPanel.setStatus("Capture stalled. Please refresh sources or capture Display.", isError: true)
@@ -344,6 +395,8 @@ final class MainViewController: NSViewController {
 
         Task { [weak self] in
             guard let self else { return }
+            self.clearSubtitles()
+            defer { self.refreshSubtitles(skippingCurrentFrame: true) }
             do {
                 try await self.renderer.reconfigureCapture(target: target)
                 await MainActor.run {
@@ -601,6 +654,7 @@ extension MainViewController: ControlPanelViewDelegate {
                     self.scheduleCaptureHealthCheck()
                     self.updateWindowTitle()
                     RunGuard.shared.arm()
+                    self.refreshSubtitles()
                 }
             } catch {
                 PipelineLog.shared.event("session", "start failed: \(error.localizedDescription)")
@@ -616,6 +670,7 @@ extension MainViewController: ControlPanelViewDelegate {
     }
 
     func controlPanelDidPressStop(_ panel: ControlPanelView) {
+        clearSubtitles()
         RunGuard.shared.disarm()
         panel.setStatus("Stopping...")
 

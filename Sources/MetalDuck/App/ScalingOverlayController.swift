@@ -94,6 +94,10 @@ final class ScalingOverlayController {
         outputViewController.updateStats(stats)
     }
 
+    func setSubtitle(_ text: String) {
+        outputViewController.setSubtitle(text)
+    }
+
     func setHUDVisible(_ visible: Bool, animated: Bool) {
         outputViewController.setTelemetryVisible(visible, animated: animated)
     }

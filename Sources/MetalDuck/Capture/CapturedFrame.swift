@@ -4,6 +4,7 @@ import CoreVideo
 import Metal
 
 struct CapturedFrame {
+    let subtitleImage: SubtitleImage
     let texture: MTLTexture
     let timestamp: CMTime
     let contentRect: CGRect

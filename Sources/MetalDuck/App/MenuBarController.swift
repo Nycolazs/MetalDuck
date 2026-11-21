@@ -8,6 +8,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onStop: (() -> Void)?
     var onShowWindow: (() -> Void)?
     var onQuit: (() -> Void)?
+    var onSubtitleLanguage: ((String?) -> Void)?
+    var onToggleWholeFrameOCR: (() -> Void)?
+    var subtitleLanguage: String?
+    var wholeFrameOCR = false
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private var isRunning = false
@@ -84,6 +88,27 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(shortcut)
         menu.addItem(.separator())
 
+        let subtitles = NSMenuItem(title: "Türkçe Altyazı", action: nil, keyEquivalent: "")
+        let choices = NSMenu()
+        let languages: [(String?, String)] = [
+            (nil, "Kapalı"), ("en", "İngilizce"), ("ja", "Japonca"), ("ko", "Korece"),
+            ("de", "Almanca"), ("fr", "Fransızca"), ("es", "İspanyolca")
+        ]
+        for (code, name) in languages {
+            let item = NSMenuItem(title: name, action: #selector(selectSubtitleLanguage(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = code
+            item.state = subtitleLanguage == code ? .on : .off
+            choices.addItem(item)
+        }
+        choices.addItem(.separator())
+        let wholeFrame = NSMenuItem(title: "Tüm Görüntüyü Tara", action: #selector(toggleWholeFrameOCR), keyEquivalent: "")
+        wholeFrame.target = self
+        wholeFrame.state = wholeFrameOCR ? .on : .off
+        choices.addItem(wholeFrame)
+        subtitles.submenu = choices
+        menu.addItem(subtitles)
+
         let show = NSMenuItem(title: "Show Window", action: #selector(handleShowWindow), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
@@ -104,6 +129,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             .withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium))
         image?.isTemplate = true
         return image
+    }
+
+    @objc private func selectSubtitleLanguage(_ item: NSMenuItem) {
+        onSubtitleLanguage?(item.representedObject as? String)
+    }
+
+    @objc private func toggleWholeFrameOCR() {
+        onToggleWholeFrameOCR?()
     }
 
     @objc private func handleStop() {

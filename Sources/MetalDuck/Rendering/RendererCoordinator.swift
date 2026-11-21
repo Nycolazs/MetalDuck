@@ -270,6 +270,12 @@ final class RendererCoordinator: NSObject {
         }
     }
 
+    @MainActor
+    func latestSubtitleFrame() -> (image: SubtitleImage, sequence: UInt64)? {
+        guard running, let snapshot = snapshotLatestFrame() else { return nil }
+        return (snapshot.frame.subtitleImage, snapshot.sequence)
+    }
+
     private func snapshotLatestFrame() -> (frame: CapturedFrame, sequence: UInt64, arrival: CFTimeInterval)? {
         frameLock.lock()
         defer { frameLock.unlock() }

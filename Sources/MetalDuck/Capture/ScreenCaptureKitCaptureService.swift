@@ -237,8 +237,9 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         switch selection {
         case .display(let display):
             let currentPID = ProcessInfo.processInfo.processIdentifier
-            let ownWindows = shareableContent.windows.filter { $0.owningApplication?.processID == currentPID }
-            let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
+            // Exclude the whole app so windows created after capture starts are also excluded.
+            let ownApps = shareableContent.applications.filter { $0.processID == currentPID }
+            let filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
             if #available(macOS 14.2, *) {
                 filter.includeMenuBar = false
             }
@@ -351,6 +352,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
 
         let frame = CapturedFrame(
+            subtitleImage: SubtitleImage(pixelBuffer: pixelBuffer),
             texture: metalTexture,
             timestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
             contentRect: CGRect(x: 0, y: 0, width: width, height: height),
