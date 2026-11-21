@@ -85,6 +85,7 @@ final class ControlPanelView: NSView {
 
     // Pages
     private let controlsPage = NSView()
+    private let settingsScroll = NSScrollView()
     private var monitorPage: MonitorView?
     private weak var monitorRow: SidebarRow?
     private weak var sessionCard: NSView?
@@ -329,6 +330,12 @@ final class ControlPanelView: NSView {
         }
     }
 
+    func scrollSettingsToTop() {
+        layoutSubtreeIfNeeded()
+        settingsScroll.contentView.scroll(to: .zero)
+        settingsScroll.reflectScrolledClipView(settingsScroll.contentView)
+    }
+
     func setSubtitleSettings(language: String?, wholeFrame: Bool) {
         let index = MenuBarController.subtitleLanguages.firstIndex { $0.0 == language } ?? 0
         subtitleLanguageDropdown.selectItem(at: index)
@@ -521,7 +528,20 @@ final class ControlPanelView: NSView {
 
         controlsPage.translatesAutoresizingMaskIntoConstraints = false
         controlsPage.addSubview(session)
-        controlsPage.addSubview(sections)
+        settingsScroll.translatesAutoresizingMaskIntoConstraints = false
+        settingsScroll.drawsBackground = false
+        settingsScroll.hasVerticalScroller = true
+        settingsScroll.autohidesScrollers = true
+        settingsScroll.scrollerStyle = .overlay
+
+        let settingsDocument = FlippedView()
+        settingsDocument.translatesAutoresizingMaskIntoConstraints = false
+        settingsScroll.documentView = settingsDocument
+        settingsDocument.addSubview(sections)
+        controlsPage.addSubview(settingsScroll)
+
+        let preferredSettingsHeight = settingsScroll.heightAnchor.constraint(equalTo: settingsDocument.heightAnchor)
+        preferredSettingsHeight.priority = .defaultLow
 
         addSubview(sidebar)
         addSubview(header)
@@ -560,18 +580,24 @@ final class ControlPanelView: NSView {
             controlsPage.leadingAnchor.constraint(equalTo: header.leadingAnchor),
             controlsPage.trailingAnchor.constraint(equalTo: header.trailingAnchor),
             controlsPage.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16),
-            // The window height follows the controls, so the cards always end
-            // level with the sidebar instead of leaving an empty band.
             controlsPage.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -inset),
 
             session.leadingAnchor.constraint(equalTo: controlsPage.leadingAnchor),
             session.trailingAnchor.constraint(equalTo: controlsPage.trailingAnchor),
             session.topAnchor.constraint(equalTo: controlsPage.topAnchor),
 
-            sections.leadingAnchor.constraint(equalTo: controlsPage.leadingAnchor),
-            sections.trailingAnchor.constraint(equalTo: controlsPage.trailingAnchor),
-            sections.topAnchor.constraint(equalTo: session.bottomAnchor, constant: GlassMetrics.sectionSpacing),
-            sections.bottomAnchor.constraint(equalTo: controlsPage.bottomAnchor)
+            settingsScroll.leadingAnchor.constraint(equalTo: controlsPage.leadingAnchor),
+            settingsScroll.trailingAnchor.constraint(equalTo: controlsPage.trailingAnchor),
+            settingsScroll.topAnchor.constraint(equalTo: session.bottomAnchor, constant: GlassMetrics.sectionSpacing),
+            settingsScroll.bottomAnchor.constraint(equalTo: controlsPage.bottomAnchor),
+            settingsDocument.leadingAnchor.constraint(equalTo: settingsScroll.contentView.leadingAnchor),
+            settingsDocument.topAnchor.constraint(equalTo: settingsScroll.contentView.topAnchor),
+            settingsDocument.widthAnchor.constraint(equalTo: settingsScroll.contentView.widthAnchor),
+            sections.leadingAnchor.constraint(equalTo: settingsDocument.leadingAnchor),
+            sections.trailingAnchor.constraint(equalTo: settingsDocument.trailingAnchor),
+            sections.topAnchor.constraint(equalTo: settingsDocument.topAnchor),
+            sections.bottomAnchor.constraint(equalTo: settingsDocument.bottomAnchor),
+            preferredSettingsHeight
         ])
         applySidebarState(animated: false)
     }
@@ -863,10 +889,14 @@ final class ControlPanelView: NSView {
     }
 
     private func makeSections() -> NSView {
-        let groups = [makeCaptureGroup(), makeFrameGenerationGroup(), makeScalingGroup(), makeDynamicResolutionGroup()]
-        let leftColumn = makeColumn([groups[0], groups[1]])
-        let rightColumn = makeColumn([groups[2], groups[3]])
-        revealViews.append(contentsOf: [groups[0], groups[2], groups[1], groups[3]])
+        let capture = makeCaptureGroup()
+        let subtitles = makeSubtitleGroup()
+        let frameGeneration = makeFrameGenerationGroup()
+        let scaling = makeScalingGroup()
+        let resolution = makeDynamicResolutionGroup()
+        let leftColumn = makeColumn([capture, frameGeneration])
+        let rightColumn = makeColumn([scaling, subtitles, resolution])
+        revealViews.append(contentsOf: [capture, scaling, frameGeneration, subtitles, resolution])
 
         let columns = NSStackView(views: [leftColumn, rightColumn])
         columns.translatesAutoresizingMaskIntoConstraints = false
@@ -883,13 +913,23 @@ final class ControlPanelView: NSView {
         column.translatesAutoresizingMaskIntoConstraints = false
         column.orientation = .vertical
         column.alignment = .leading
+        column.distribution = .fill
         column.spacing = GlassMetrics.sectionSpacing
         column.setHuggingPriority(.required, for: .vertical)
         for group in groups {
             group.leadingAnchor.constraint(equalTo: column.leadingAnchor).isActive = true
             group.trailingAnchor.constraint(equalTo: column.trailingAnchor).isActive = true
         }
-        return column
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(column)
+        NSLayoutConstraint.activate([
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            column.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            column.topAnchor.constraint(equalTo: container.topAnchor),
+            column.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor)
+        ])
+        return container
     }
 
     private func makeCaptureGroup() -> NSView {
@@ -901,6 +941,14 @@ final class ControlPanelView: NSView {
         group.addRow(makeWideRow(icon: modeIcon, title: modeTitle, control: captureModeControl))
         group.addRow(makeWideRow(icon: sourceIcon, title: sourceTitleLabel, control: sourcePicker))
         configureSourcePicker()
+        group.addRow(SettingRow.control("Show cursor", symbol: "cursorarrow", control: captureCursorSwitch))
+        group.addRow(SettingRow.slider("Capture rate", symbol: "timer", help: "Expected cadence of the source.", slider: captureFPSSlider, value: captureFPSValueLabel))
+        group.addRow(SettingRow.slider("Queue depth", symbol: "square.stack.3d.up", help: "Buffered frames. Higher is steadier, lower has less latency.", slider: queueDepthSlider, value: queueDepthValueLabel))
+        return group
+    }
+
+    private func makeSubtitleGroup() -> NSView {
+        let group = SettingsGroup(title: "Türkçe Altyazı (OCR)", symbol: "text.viewfinder")
         let subtitleLanguages = MenuBarController.subtitleLanguages
         subtitleLanguageDropdown.items = subtitleLanguages.map { $0.1 }
         subtitleLanguageDropdown.onSelectionChanged = { [weak self] _, index in
@@ -908,11 +956,8 @@ final class ControlPanelView: NSView {
         }
         wholeFrameOCRSwitch.target = self
         wholeFrameOCRSwitch.action = #selector(handleWholeFrameOCRChanged)
-        group.addRow(SettingRow.control("Türkçe Altyazı (OCR)", symbol: "text.viewfinder", control: subtitleLanguageDropdown))
+        group.addRow(SettingRow.control("Kaynak dili", symbol: "character.bubble", control: subtitleLanguageDropdown))
         group.addRow(SettingRow.control("Tüm görüntüyü tara", symbol: "viewfinder", control: wholeFrameOCRSwitch))
-        group.addRow(SettingRow.control("Show cursor", symbol: "cursorarrow", control: captureCursorSwitch))
-        group.addRow(SettingRow.slider("Capture rate", symbol: "timer", help: "Expected cadence of the source.", slider: captureFPSSlider, value: captureFPSValueLabel))
-        group.addRow(SettingRow.slider("Queue depth", symbol: "square.stack.3d.up", help: "Buffered frames. Higher is steadier, lower has less latency.", slider: queueDepthSlider, value: queueDepthValueLabel))
         return group
     }
 

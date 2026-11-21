@@ -101,6 +101,7 @@ final class MainViewController: NSViewController {
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        controlPanel.scrollSettingsToTop()
         view.window?.makeFirstResponder(self)
         updateWindowTitle()
     }
