@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreMedia
 import CoreText
 import CoreVideo
 import Testing
@@ -18,11 +19,30 @@ struct SubtitleOCRTests {
         #expect(result == "Quest updated\nOpen the gate")
     }
 
+    @Test func externalVideoFrameKeepsTimestampAndCanBeReadByOCR() throws {
+        let image = try makeFrame()
+        let timestamp = CMTime(value: 2, timescale: 30)
+        let context = try MetalContext()
+        let frame = try #require(CapturedFrame(
+            pixelBuffer: image.pixelBuffer,
+            timestamp: timestamp,
+            targetRect: nil,
+            context: context
+        ))
+        #expect(frame.targetRect == nil)
+        #expect(frame.timestamp == timestamp)
+        #expect(frame.texture.width == 960)
+        #expect(frame.texture.height == 540)
+        let result = try SubtitleOCR.recognize(frame.subtitleImage, language: "en", wholeFrame: false)
+        #expect(result == "Open the gate")
+    }
+
     private func makeFrame() throws -> SubtitleImage {
         let width = 960
         let height = 540
         var storage: CVPixelBuffer?
-        let status = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, nil, &storage)
+        let attributesForStorage = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary
+        let status = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attributesForStorage, &storage)
         #expect(status == kCVReturnSuccess)
         let buffer = try #require(storage)
         CVPixelBufferLockBaseAddress(buffer, [])

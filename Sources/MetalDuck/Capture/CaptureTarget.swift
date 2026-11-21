@@ -5,6 +5,7 @@ enum CaptureTarget: Equatable {
     case automatic
     case display(CGDirectDisplayID)
     case window(CGWindowID?)
+    case videoDevice(String?)
 }
 
 struct CaptureConfiguration: Codable, Equatable {

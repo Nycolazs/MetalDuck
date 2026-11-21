@@ -21,7 +21,7 @@ final class ScalingOverlayController {
         self.controlWindow = window
     }
 
-    func show(on displayID: CGDirectDisplayID?) {
+    func show(on displayID: CGDirectDisplayID?, fillVisibleScreen: Bool = false) {
         let targetScreen = Self.screen(for: displayID) ?? controlWindow?.screen ?? NSScreen.main
         guard let targetScreen else {
             return
@@ -32,7 +32,9 @@ final class ScalingOverlayController {
         if window.isMiniaturized {
             window.deminiaturize(nil)
         }
-        if window.screen != targetScreen {
+        if fillVisibleScreen {
+            window.setFrame(targetScreen.visibleFrame, display: true, animate: false)
+        } else if window.screen != targetScreen {
             window.setFrame(Self.defaultOutputFrame(for: targetScreen), display: true, animate: false)
         }
         outputViewController.updateColorSpace(targetScreen.colorSpace?.cgColorSpace)

@@ -23,7 +23,7 @@ struct CaptureSourceCatalog {
 
 enum CaptureSourceCatalogProvider {
     static func load() async -> CaptureSourceCatalog {
-        if #available(macOS 12.3, *) {
+        if #available(macOS 12.3, *), CGPreflightScreenCaptureAccess() {
             do {
                 return try await loadFromScreenCaptureKit()
             } catch {

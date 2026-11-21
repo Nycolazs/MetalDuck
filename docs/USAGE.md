@@ -27,3 +27,16 @@ overlay. Enable **Tüm Görüntüyü Tara** to include menus and text elsewhere 
 the window. For display capture, this includes any other visible apps in the
 scan area. Pick **Kapalı** to turn subtitles off. Screen recognition and
 translation run on the Mac. Text and frames are held in memory during the session.
+
+## Capture cards
+
+Use the packaged **MetalDuck.app** with a USB capture card that macOS exposes
+as an external video device (for example, a UVC HDMI capture card). Connect the
+card and HDMI source, select **Card** under Capture Mode, refresh sources if
+needed, and choose the device by name. Allow Camera access when macOS asks.
+Start scaling as usual. The video opens on the control window's display and
+uses the same upscaling, frame generation, and Turkish subtitle controls.
+
+This captures video. Audio stays with your existing routing. The card supplies
+the input format and frame rate. MetalDuck's capture FPS setting caps the rate
+passed to the rendering pipeline.
