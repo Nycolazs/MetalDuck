@@ -170,6 +170,8 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         let currentPID = ProcessInfo.processInfo.processIdentifier
 
         switch target {
+        case .videoDevice:
+            throw VideoDeviceCaptureError.noDevice
         case .display(let requestedDisplayID):
             if let display = shareableContent.displays.first(where: { $0.displayID == requestedDisplayID }) {
                 return .display(display)
@@ -237,8 +239,9 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         switch selection {
         case .display(let display):
             let currentPID = ProcessInfo.processInfo.processIdentifier
-            let ownWindows = shareableContent.windows.filter { $0.owningApplication?.processID == currentPID }
-            let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
+            // Exclude the whole app so windows created after capture starts are also excluded.
+            let ownApps = shareableContent.applications.filter { $0.processID == currentPID }
+            let filter = SCContentFilter(display: display, excludingApplications: ownApps, exceptingWindows: [])
             if #available(macOS 14.2, *) {
                 filter.includeMenuBar = false
             }
@@ -317,26 +320,6 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
 
-        var wrappedTexture: CVMetalTexture?
-        let cacheStatus = CVMetalTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault,
-            context.textureCache,
-            pixelBuffer,
-            nil,
-            .bgra8Unorm,
-            width,
-            height,
-            0,
-            &wrappedTexture
-        )
-
-        guard cacheStatus == kCVReturnSuccess,
-              let wrappedTexture,
-              let metalTexture = CVMetalTextureGetTexture(wrappedTexture) else {
-            PipelineLog.shared.noteCaptureDrop("could not wrap pixel buffer as a Metal texture (status \(cacheStatus))")
-            return
-        }
-
         var targetRect = CGRect(x: 0, y: 0, width: width, height: height)
         if let trackedWindowID = self.trackedWindowID {
             let options = CGWindowListOption(arrayLiteral: .optionIncludingWindow)
@@ -350,13 +333,12 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             targetRect = CGDisplayBounds(trackedDisplayID)
         }
 
-        let frame = CapturedFrame(
-            texture: metalTexture,
+        guard let frame = CapturedFrame(
+            pixelBuffer: pixelBuffer,
             timestamp: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
-            contentRect: CGRect(x: 0, y: 0, width: width, height: height),
             targetRect: targetRect,
-            backingTexture: wrappedTexture
-        )
+            context: context
+        ) else { return }
 
         let now = ProcessInfo.processInfo.systemUptime
         let interval = lastSampleUptime > 0 ? now - lastSampleUptime : 0

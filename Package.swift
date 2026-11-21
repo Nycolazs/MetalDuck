@@ -16,6 +16,7 @@ let package = Package(
                 .process("Assets"),
                 .process("Rendering/Shaders")
             ]
-        )
+        ),
+        .testTarget(name: "MetalDuckTests", dependencies: ["MetalDuck"])
     ]
 )

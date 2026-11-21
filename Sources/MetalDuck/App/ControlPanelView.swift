@@ -5,6 +5,7 @@ enum CaptureModeChoice: Int, CaseIterable {
     case automatic
     case display
     case window
+    case videoDevice
 
     var title: String {
         switch self {
@@ -14,6 +15,8 @@ enum CaptureModeChoice: Int, CaseIterable {
             return "Display"
         case .window:
             return "Window"
+        case .videoDevice:
+            return "Capture Card"
         }
     }
 
@@ -25,6 +28,8 @@ enum CaptureModeChoice: Int, CaseIterable {
             return "Display"
         case .window:
             return "Window"
+        case .videoDevice:
+            return "Card"
         }
     }
 }
@@ -942,6 +947,9 @@ final class ControlPanelView: NSView {
         case .window:
             title = "Window"
             symbol = "macwindow"
+        case .videoDevice:
+            title = "Capture Card"
+            symbol = "video"
         }
         GlassMotion.crossfade(sourceTitleLabel, to: title, duration: animated ? 0.25 : 0)
         if let image = GlassSymbol.image(symbol, size: 13) {

@@ -78,7 +78,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.mainViewController = viewController
 
             Task { await viewController.start() }
-            requestScreenCapturePermissionIfNeededAsync()
             requestAccessibilityPermissionIfNeededAsync()
         } catch {
             print("CRITICAL: Bootstrap failed: \(error)")
@@ -111,20 +110,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "Quit")
         alert.runModal()
         NSApplication.shared.terminate(nil)
-    }
-
-    private func requestScreenCapturePermissionIfNeededAsync() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            AppDelegate.requestScreenCapturePermissionIfNeeded()
-        }
-    }
-
-    nonisolated private static func requestScreenCapturePermissionIfNeeded() {
-        guard !CGPreflightScreenCaptureAccess() else {
-            return
-        }
-
-        _ = CGRequestScreenCaptureAccess()
     }
 
     private func requestAccessibilityPermissionIfNeededAsync() {

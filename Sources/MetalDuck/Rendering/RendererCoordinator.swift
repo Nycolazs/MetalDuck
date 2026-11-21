@@ -199,8 +199,17 @@ final class RendererCoordinator: NSObject {
 
     @MainActor
     func reconfigureCapture(target: CaptureTarget) async throws {
+        guard activeCaptureTarget != target else { return }
+        resetFrameState()
+        frameGenerationEngine.reset()
         activeCaptureTarget = target
-        try await captureService.reconfigure(target: target)
+        do {
+            try await captureService.reconfigure(target: target)
+        } catch {
+            running = false
+            pauseDrawing()
+            throw error
+        }
     }
 
     @MainActor
@@ -251,7 +260,9 @@ final class RendererCoordinator: NSObject {
             self.rawCaptureFrameCounter += 1
             self.statsLock.unlock()
 
-            self.onGeometryUpdate?(frame.targetRect)
+            if let targetRect = frame.targetRect {
+                self.onGeometryUpdate?(targetRect)
+            }
         }
 
         captureService.onError = { [weak self] error in
@@ -268,6 +279,12 @@ final class RendererCoordinator: NSObject {
             self?.running = false
             self?.onError?(error)
         }
+    }
+
+    @MainActor
+    func latestSubtitleFrame() -> (image: SubtitleImage, sequence: UInt64)? {
+        guard running, let snapshot = snapshotLatestFrame() else { return nil }
+        return (snapshot.frame.subtitleImage, snapshot.sequence)
     }
 
     private func snapshotLatestFrame() -> (frame: CapturedFrame, sequence: UInt64, arrival: CFTimeInterval)? {

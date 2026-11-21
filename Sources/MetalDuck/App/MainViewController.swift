@@ -10,6 +10,9 @@ final class MainViewController: NSViewController {
         let target: CaptureTarget
     }
 
+    private static let subtitleLanguageKey = "com.metalduck.subtitleLanguage"
+    private static let wholeFrameOCRKey = "com.metalduck.wholeFrameOCR"
+
     private static let showHUDKey = "com.metalduck.showHUD"
 
     private let controlPanel = ControlPanelView(frame: .zero)
@@ -17,6 +20,7 @@ final class MainViewController: NSViewController {
     private let settingsStore = SettingsStore()
     private let profileManager = ProfileManager.shared
     private let overlayController: ScalingOverlayController
+    private let subtitles = TurkishSubtitleController()
     private let menuBar = MenuBarController()
     private let outsideClickDismisser = OutsideClickDismisser()
 
@@ -30,6 +34,8 @@ final class MainViewController: NSViewController {
     private var selectedCaptureMode: CaptureModeChoice = .automatic
     private var selectedDisplayIndex: Int = 0
     private var selectedWindowIndex: Int = 0
+    private var selectedVideoDeviceID: String?
+    private var videoDevices: [VideoCaptureSource] = []
 
     private var displayEntries: [CaptureEntry] = []
     private var windowEntries: [CaptureEntry] = []
@@ -64,6 +70,9 @@ final class MainViewController: NSViewController {
             selectedCaptureMode = .display
         case .window:
             selectedCaptureMode = .window
+        case .videoDevice(let id):
+            selectedCaptureMode = .videoDevice
+            selectedVideoDeviceID = id
         }
 
         controlPanel.delegate = self
@@ -114,6 +123,47 @@ final class MainViewController: NSViewController {
         overlayController.hide()
         updateWindowTitle()
         setupShortcutManager()
+        let defaults = UserDefaults.standard
+        menuBar.subtitleLanguage = defaults.string(forKey: Self.subtitleLanguageKey)
+        menuBar.wholeFrameOCR = defaults.bool(forKey: Self.wholeFrameOCRKey)
+        menuBar.onSubtitleLanguage = { [weak self] language in
+            guard let self else { return }
+            self.menuBar.subtitleLanguage = language
+            defaults.set(language, forKey: Self.subtitleLanguageKey)
+            self.refreshSubtitles()
+        }
+        menuBar.onToggleWholeFrameOCR = { [weak self] in
+            guard let self else { return }
+            self.menuBar.wholeFrameOCR.toggle()
+            defaults.set(self.menuBar.wholeFrameOCR, forKey: Self.wholeFrameOCRKey)
+            self.refreshSubtitles()
+        }
+    }
+
+    private func clearSubtitles() {
+        subtitles.stop()
+        overlayController.setSubtitle("")
+    }
+
+    private func refreshSubtitles() {
+        clearSubtitles()
+        guard renderer.isRunning, let language = menuBar.subtitleLanguage else { return }
+        guard #available(macOS 26, *) else {
+            overlayController.setSubtitle("Türkçe altyazı için macOS 26 veya üzeri gerekir.")
+            return
+        }
+        subtitles.start(
+            language: language,
+            wholeFrame: menuBar.wholeFrameOCR,
+            nextFrame: { [weak self] in
+                self?.renderer.latestSubtitleFrame()
+            },
+            show: { [weak self] text in self?.overlayController.setSubtitle(text) },
+            report: { [weak self] message in
+                self?.overlayController.setSubtitle(message)
+                self?.controlPanel.setStatus(message, isError: true)
+            }
+        )
     }
 
     private func setupShortcutManager() {
@@ -194,6 +244,7 @@ final class MainViewController: NSViewController {
 
 
     func stop() async {
+        clearSubtitles()
         RunGuard.shared.disarm()
         await renderer.stop()
         DispatchQueue.main.async { [weak self] in
@@ -224,6 +275,15 @@ final class MainViewController: NSViewController {
     }
 
     private func handleRendererError(_ error: Error) {
+        clearSubtitles()
+        if error is VideoDeviceCaptureError {
+            RunGuard.shared.disarm()
+            controlPanel.setRunning(false)
+            menuBar.setRunning(false)
+            overlayController.hide()
+            controlPanel.setStatus(error.localizedDescription, isError: true)
+            return
+        }
         if (error as? CaptureStaleError) == .framesStalled {
             let now = CACurrentMediaTime()
             if now - lastAutoRecoveryTime > 10.0 {
@@ -244,6 +304,7 @@ final class MainViewController: NSViewController {
                     try? await self.renderer.reconfigureCapture(target: target)
                     try? await self.renderer.reconfigureCapture(configuration: config)
                     try? await self.renderer.start()
+                    self.refreshSubtitles()
                 }
             } else {
                 controlPanel.setStatus("Capture stalled. Please refresh sources or capture Display.", isError: true)
@@ -278,6 +339,10 @@ final class MainViewController: NSViewController {
     private func refreshCaptureSources() async {
         controlPanel.setStatus("Scanning sources...")
 
+        videoDevices = VideoDeviceCaptureService.sources()
+        if !videoDevices.contains(where: { $0.id == selectedVideoDeviceID }) {
+            selectedVideoDeviceID = videoDevices.first?.id
+        }
         let catalog = await CaptureSourceCatalogProvider.load()
 
         displayEntries = catalog.displays.map { source in
@@ -323,6 +388,11 @@ final class MainViewController: NSViewController {
             if !titles.isEmpty {
                 selectedWindowIndex = min(selectedWindowIndex, titles.count - 1)
             }
+        case .videoDevice:
+            controlPanel.setCaptureSourceTitles(
+                videoDevices.map(\.title),
+                selectedIndex: videoDevices.firstIndex { $0.id == selectedVideoDeviceID }
+            )
         }
     }
 
@@ -336,6 +406,8 @@ final class MainViewController: NSViewController {
         case .window:
             guard !windowEntries.isEmpty else { return .window(nil) }
             return windowEntries[min(selectedWindowIndex, windowEntries.count - 1)].target
+        case .videoDevice:
+            return .videoDevice(selectedVideoDeviceID)
         }
     }
 
@@ -344,17 +416,21 @@ final class MainViewController: NSViewController {
 
         Task { [weak self] in
             guard let self else { return }
+            self.clearSubtitles()
             do {
                 try await self.renderer.reconfigureCapture(target: target)
                 await MainActor.run {
                     if self.renderer.isRunning {
-                        self.overlayController.show(on: self.outputDisplayID(for: target))
+                        self.showOverlay(for: target)
+                        self.refreshSubtitles()
                     }
                 }
             } catch {
-                await MainActor.run {
-                    self.controlPanel.setStatus("Capture target failed", isError: true)
-                }
+                RunGuard.shared.disarm()
+                self.controlPanel.setRunning(false)
+                self.menuBar.setRunning(false)
+                self.overlayController.hide()
+                self.controlPanel.setStatus(error.localizedDescription, isError: true)
             }
         }
     }
@@ -397,12 +473,22 @@ final class MainViewController: NSViewController {
         return granted
     }
 
+    private func showOverlay(for target: CaptureTarget) {
+        if case .videoDevice = target {
+            overlayController.show(on: outputDisplayID(for: target), fillVisibleScreen: true)
+        } else {
+            overlayController.show(on: outputDisplayID(for: target))
+        }
+    }
+
     private func outputDisplayID(for target: CaptureTarget) -> CGDirectDisplayID? {
         switch target {
         case .display(let displayID):
             return displayID
         case .window(let windowID):
             return displayIDForWindow(windowID) ?? displayIDForScreen(view.window?.screen)
+        case .videoDevice:
+            return displayIDForScreen(view.window?.screen)
         case .automatic:
             return displayIDForFrontmostExternalWindow() ?? displayIDForScreen(view.window?.screen)
         }
@@ -482,20 +568,24 @@ final class MainViewController: NSViewController {
 
     private func scheduleCaptureHealthCheck() {
         let startedAt = CACurrentMediaTime()
+        let target = selectedCaptureTarget()
         lastStatsUpdateTime = nil
 
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await MainActor.run {
                 guard let self else { return }
-                guard self.renderer.isRunning else { return }
+                guard self.renderer.isRunning, self.selectedCaptureTarget() == target else { return }
 
                 let receivedStats = (self.lastStatsUpdateTime ?? 0) > startedAt
                 if !receivedStats {
-                    self.controlPanel.setStatus(
-                        "No frames received. Check Screen Recording permission and selected source.",
-                        isError: true
-                    )
+                    let message: String
+                    if case .videoDevice = target {
+                        message = "No video received. Check the capture card and HDMI signal."
+                    } else {
+                        message = "No frames received. Check Screen Recording permission and selected source."
+                    }
+                    self.controlPanel.setStatus(message, isError: true)
                     self.overlayController.setWaitingForFrames(message: "Waiting for frames...")
                 }
             }
@@ -576,7 +666,12 @@ extension MainViewController: ControlPanelViewDelegate {
 
     private func beginScaling() {
         let panel = controlPanel
-        guard ensureScreenCapturePermission() else {
+        let target = selectedCaptureTarget()
+        if case .videoDevice(nil) = target {
+            panel.setStatus(VideoDeviceCaptureError.noDevice.localizedDescription, isError: true)
+            return
+        }
+        guard selectedCaptureMode == .videoDevice || ensureScreenCapturePermission() else {
             PipelineLog.shared.event("session", "start refused: Screen Recording permission denied")
             panel.setStatus("Screen Recording permission denied.", isError: true)
             overlayController.setCaptureError("Screen Recording permission denied")
@@ -584,8 +679,7 @@ extension MainViewController: ControlPanelViewDelegate {
         }
 
         panel.setStatus("Starting...")
-        let target = selectedCaptureTarget()
-        overlayController.show(on: outputDisplayID(for: target))
+        showOverlay(for: target)
         overlayController.setWaitingForFrames(message: "Starting capture...")
 
         Task { [weak self] in
@@ -601,13 +695,14 @@ extension MainViewController: ControlPanelViewDelegate {
                     self.scheduleCaptureHealthCheck()
                     self.updateWindowTitle()
                     RunGuard.shared.arm()
+                    self.refreshSubtitles()
                 }
             } catch {
                 PipelineLog.shared.event("session", "start failed: \(error.localizedDescription)")
                 await MainActor.run {
                     panel.setRunning(false)
                     self.menuBar.setRunning(false)
-                    panel.setStatus("Start failed", isError: true)
+                    panel.setStatus(error.localizedDescription, isError: true)
                     self.overlayController.setCaptureError("Start failed: \(error.localizedDescription)")
                     self.overlayController.hide()
                 }
@@ -616,6 +711,7 @@ extension MainViewController: ControlPanelViewDelegate {
     }
 
     func controlPanelDidPressStop(_ panel: ControlPanelView) {
+        clearSubtitles()
         RunGuard.shared.disarm()
         panel.setStatus("Stopping...")
 
@@ -651,6 +747,9 @@ extension MainViewController: ControlPanelViewDelegate {
             selectedDisplayIndex = max(index, 0)
         case .window:
             selectedWindowIndex = max(index, 0)
+        case .videoDevice:
+            guard videoDevices.indices.contains(index) else { return }
+            selectedVideoDeviceID = videoDevices[index].id
         }
         applyCaptureTargetSelection()
     }

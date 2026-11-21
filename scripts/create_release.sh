@@ -75,6 +75,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <string>AppIcon.icns</string>
   <key>LSMinimumSystemVersion</key>
   <string>15.0</string>
+  <key>NSCameraUsageDescription</key>
+  <string>MetalDuck uses the selected external video device to display and process capture card video.</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>

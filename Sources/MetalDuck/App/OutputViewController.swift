@@ -5,6 +5,9 @@ import MetalKit
 final class OutputViewController: NSViewController {
     let mtkView: MTKView
 
+    private let subtitleLabel = NSTextField(wrappingLabelWithString: "")
+    private let subtitleBackground = NSView()
+
     private let telemetryContainer = NSVisualEffectView()
     private let sourceFPSLabel = OutputViewController.valueLabel()
     private let generatedFPSLabel = OutputViewController.valueLabel()
@@ -78,6 +81,30 @@ final class OutputViewController: NSViewController {
         rootView.addSubview(mtkView)
         rootView.addSubview(telemetryContainer)
 
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.alignment = .center
+        subtitleLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        subtitleLabel.textColor = .white
+        subtitleLabel.maximumNumberOfLines = 4
+        subtitleLabel.lineBreakMode = .byTruncatingTail
+        subtitleBackground.translatesAutoresizingMaskIntoConstraints = false
+        subtitleBackground.wantsLayer = true
+        subtitleBackground.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.82).cgColor
+        subtitleBackground.layer?.cornerRadius = 8
+        subtitleBackground.isHidden = true
+        subtitleBackground.addSubview(subtitleLabel)
+        rootView.addSubview(subtitleBackground)
+
+        NSLayoutConstraint.activate([
+            subtitleBackground.centerXAnchor.constraint(equalTo: rootView.centerXAnchor),
+            subtitleBackground.widthAnchor.constraint(equalTo: rootView.widthAnchor, multiplier: 0.84),
+            subtitleBackground.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -24),
+            subtitleLabel.leadingAnchor.constraint(equalTo: subtitleBackground.leadingAnchor, constant: 12),
+            subtitleLabel.trailingAnchor.constraint(equalTo: subtitleBackground.trailingAnchor, constant: -12),
+            subtitleLabel.topAnchor.constraint(equalTo: subtitleBackground.topAnchor, constant: 8),
+            subtitleLabel.bottomAnchor.constraint(equalTo: subtitleBackground.bottomAnchor, constant: -8)
+        ])
+
         NSLayoutConstraint.activate([
             mtkView.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
             mtkView.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
@@ -100,6 +127,12 @@ final class OutputViewController: NSViewController {
 
         self.view = rootView
         setProcessingState(isRunning: false)
+    }
+
+    func setSubtitle(_ text: String) {
+        _ = view
+        subtitleLabel.stringValue = text
+        subtitleBackground.isHidden = text.isEmpty
     }
 
     func updateStats(_ stats: RendererStats) {

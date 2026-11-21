@@ -910,6 +910,8 @@ final class PipelineLog: @unchecked Sendable {
             return "automatic"
         case .display(let id):
             return "display \(id)"
+        case .videoDevice:
+            return "capture card"
         case .window(let id):
             return "window \(id.map(String.init) ?? "unspecified")"
         }
