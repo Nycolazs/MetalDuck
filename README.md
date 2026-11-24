@@ -37,6 +37,19 @@ The overlay follows the source and ignores mouse clicks, so you keep playing or 
 - **Guide.** The book icon in the sidebar explains each control and opens the GitHub repository.
 - **Monitor.** A page inside the main window with live capture, output, and generation numbers, charts, load, and the event log. Click Monitor in the sidebar, then click it again or press Esc to go back.
 
+## Lossless Scaling (optional)
+
+MetalDuck can keep your own copy of `Lossless.dll` from [Lossless Scaling](https://store.steampowered.com/app/993090/) on Steam. It is not bundled; you need the app in your Steam library.
+
+1. Open **Settings** and click **Open** next to *Steam console*. This opens `steam://open/console` in the Steam client and copies the command below.
+2. Paste and run it in the console:
+
+   ```
+   download_depot 993090 993091
+   ```
+
+3. When Steam prints the download folder, click **Import…** next to *Lossless.dll* and pick the file. MetalDuck copies it to `~/Library/Application Support/MetalDuck/Lossless.dll`.
+
 ## Using it
 
 1. Open MetalDuck and allow Screen Recording when macOS asks. Without it the capture stays empty.

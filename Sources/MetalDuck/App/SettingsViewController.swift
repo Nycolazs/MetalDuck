@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 final class SettingsViewController: NSViewController {
     var onShortcutChanged: (() -> Void)?
@@ -7,6 +8,8 @@ final class SettingsViewController: NSViewController {
 
     private let shortcutToggle = NSSwitch()
     private let recorderField = ShortcutRecorderField()
+    private let losslessStatus = GlassLabel.make("", font: GlassFont.value, color: .secondaryLabelColor)
+    private lazy var losslessImportButton = smallButton("Import…", action: #selector(handleImportLossless))
 
     init(settingsStore: SettingsStore) {
         self.settingsStore = settingsStore
@@ -49,11 +52,38 @@ final class SettingsViewController: NSViewController {
         group.addRow(SettingRow.control("Global shortcut", symbol: "command", help: "Starts or stops scaling from any app.", control: shortcutToggle))
         group.addRow(SettingRow.control("Shortcut", symbol: "record.circle", control: recorderField))
 
-        let body = NSStackView(views: [group, hint])
+        let losslessGroup = SettingsGroup(title: "Lossless Scaling", symbol: "shippingbox")
+        let losslessControls = NSStackView(views: [losslessStatus, losslessImportButton])
+        losslessControls.orientation = .horizontal
+        losslessControls.spacing = 8
+        losslessGroup.addRow(SettingRow.control(
+            LosslessScalingLibrary.fileName,
+            symbol: "doc",
+            help: "Your own copy of Lossless.dll from Lossless Scaling on Steam.",
+            control: losslessControls
+        ))
+        losslessGroup.addRow(SettingRow.control(
+            "Steam console",
+            symbol: "terminal",
+            help: "Opens steam://open/console and copies the download command.",
+            control: smallButton("Open", action: #selector(handleOpenSteamConsole))
+        ))
+
+        let losslessHint = GlassLabel.make(
+            "You need Lossless Scaling in your Steam library. Open the Steam console and run \(LosslessScalingLibrary.downloadCommand) (Open copies it for you). When Steam finishes, import Lossless.dll from the folder it prints.",
+            font: GlassFont.caption,
+            color: .tertiaryLabelColor
+        )
+        losslessHint.lineBreakMode = .byWordWrapping
+        losslessHint.maximumNumberOfLines = 4
+        losslessHint.preferredMaxLayoutWidth = 352
+
+        let body = NSStackView(views: [group, hint, losslessGroup, losslessHint])
         body.translatesAutoresizingMaskIntoConstraints = false
         body.orientation = .vertical
         body.alignment = .leading
         body.spacing = 10
+        body.setCustomSpacing(20, after: hint)
         for row in body.arrangedSubviews {
             row.leadingAnchor.constraint(equalTo: body.leadingAnchor).isActive = true
             row.trailingAnchor.constraint(equalTo: body.trailingAnchor).isActive = true
@@ -75,6 +105,69 @@ final class SettingsViewController: NSViewController {
         shortcutToggle.state = shortcut.enabled ? .on : .off
         recorderField.shortcut = shortcut
         recorderField.isEnabled = shortcut.enabled
+        refreshLosslessStatus()
+    }
+
+    private func smallButton(_ title: String, action: Selector) -> NSButton {
+        let button = HandCursorButton(title: title, target: self, action: action)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .push
+        button.controlSize = .small
+        return button
+    }
+
+    private func refreshLosslessStatus() {
+        if let size = LosslessScalingLibrary.installedSize {
+            losslessStatus.stringValue = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+            losslessImportButton.title = "Replace…"
+        } else {
+            losslessStatus.stringValue = "Not imported"
+            losslessImportButton.title = "Import…"
+        }
+    }
+
+    @objc private func handleImportLossless() {
+        guard let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.message = "Choose Lossless.dll from your Lossless Scaling download."
+        panel.prompt = "Import"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if let dll = UTType(filenameExtension: "dll") {
+            panel.allowedContentTypes = [dll]
+        }
+        if let folder = LosslessScalingLibrary.steamDownloadFolder {
+            panel.directoryURL = folder
+        }
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            do {
+                try LosslessScalingLibrary.importFile(from: url)
+                self.refreshLosslessStatus()
+            } catch {
+                self.showAlert(title: "Could not import Lossless.dll", message: error.localizedDescription)
+            }
+        }
+    }
+
+    @objc private func handleOpenSteamConsole() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(LosslessScalingLibrary.downloadCommand, forType: .string)
+        if !LosslessScalingLibrary.openSteamConsole() {
+            showAlert(
+                title: "Steam is not installed",
+                message: "Install Steam, sign in, then try again. The command \(LosslessScalingLibrary.downloadCommand) is on the clipboard."
+            )
+        }
+    }
+
+    private func showAlert(title: String, message: String) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.beginSheetModal(for: window)
     }
 
     @objc private func handleToggleChanged() {
