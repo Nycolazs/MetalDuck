@@ -981,6 +981,7 @@ final class ControlPanelView: NSView {
         group.addRow(SettingRow.control("Artifact guard", symbol: "shield.lefthalf.filled", help: "In fast action, in-between frames can tear or show see-through copies of what moves. Balanced and Strong keep those moments closer to the real frames: clean, a little less smooth there. Calm scenes are not affected.", control: artifactGuardControl))
         group.addRow(SettingRow.control("Stats overlay", symbol: "chart.bar.xaxis", help: "Show capture, generated and output FPS in the corner of the scaled window.", control: hudSwitch))
         group.addRow(SettingRow.control("Lossless.dll", symbol: "shippingbox", help: "Your own Lossless.dll from Lossless Scaling on Steam (app 993090). Steam Console opens the console and copies the download command; MetalDuck imports the file from Steam's download folder on its own.", control: LosslessControls()))
+        group.addRow(SettingRow.control("Steam download", symbol: "terminal", help: "Paste this in the Steam console to download Lossless Scaling's files. Requires Lossless Scaling in your Steam library.", control: LosslessCommandControl()))
         return group
     }
 

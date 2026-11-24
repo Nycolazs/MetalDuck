@@ -112,3 +112,44 @@ final class LosslessControls: NSStackView {
         alert.beginSheetModal(for: window)
     }
 }
+
+/// The Steam console command, shown as selectable text with a Copy button.
+@MainActor
+final class LosslessCommandControl: NSStackView {
+    private let copyButton = HandCursorButton(title: "Copy", target: nil, action: nil)
+
+    init() {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        orientation = .horizontal
+        alignment = .centerY
+        spacing = 8
+
+        let command = NSTextField(labelWithString: LosslessScalingLibrary.downloadCommand)
+        command.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        command.textColor = .labelColor
+        command.isSelectable = true
+
+        copyButton.translatesAutoresizingMaskIntoConstraints = false
+        copyButton.bezelStyle = .push
+        copyButton.controlSize = .small
+        copyButton.target = self
+        copyButton.action = #selector(handleCopy)
+        setViews([command, copyButton], in: .leading)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func handleCopy() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(LosslessScalingLibrary.downloadCommand, forType: .string)
+        copyButton.title = "Copied"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.copyButton.title = "Copy"
+        }
+    }
+}
