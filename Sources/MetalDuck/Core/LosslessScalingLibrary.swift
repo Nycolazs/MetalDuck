@@ -14,12 +14,15 @@ enum LosslessScalingLibrary {
 
     enum ImportError: LocalizedError {
         case unreadable
+        case wrongFile(String)
         case notWindowsBinary
 
         var errorDescription: String? {
             switch self {
             case .unreadable:
                 return "The file could not be read."
+            case .wrongFile(let name):
+                return "\(name) is not the frame generation library. Choose Lossless.dll from the same folder."
             case .notWindowsBinary:
                 return "This is not a Windows DLL. Choose the Lossless.dll that Steam downloaded."
             }
@@ -49,6 +52,9 @@ enum LosslessScalingLibrary {
 
     /// Checks that `source` is a PE image and copies it over any earlier import.
     static func importFile(from source: URL) throws {
+        guard source.lastPathComponent.caseInsensitiveCompare(fileName) == .orderedSame else {
+            throw ImportError.wrongFile(source.lastPathComponent)
+        }
         guard let handle = try? FileHandle(forReadingFrom: source) else { throw ImportError.unreadable }
         defer { try? handle.close() }
         guard let header = try? handle.read(upToCount: 4096), isPortableExecutable(header) else {
