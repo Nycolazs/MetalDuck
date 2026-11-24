@@ -117,6 +117,9 @@ final class ControlPanelView: NSView {
 
     // Scaling
     private let upscalerDropdown = CompactDropdown()
+    /// Only the built-in engine runs today; Lossless FG is listed so users can see it is planned.
+    private let frameGenerationEngineDropdown = CompactDropdown()
+    private static let frameGenerationEngines = ["MetalDuck", "Lossless FG (not available yet)"]
     private let outputScaleSlider = NSSlider(value: 1.5, minValue: 0.75, maxValue: 3.0, target: nil, action: nil)
     private let outputScaleValueLabel = NSTextField(labelWithString: "1.50×")
     private let matchOutputResolutionSwitch = GlassSwitch()
@@ -439,6 +442,14 @@ final class ControlPanelView: NSView {
             self.delegate?.controlPanel(self, didChangeUpscalingAlgorithm: value)
         }
 
+        frameGenerationEngineDropdown.items = Self.frameGenerationEngines
+        frameGenerationEngineDropdown.selectItem(at: 0)
+        frameGenerationEngineDropdown.onSelectionChanged = { [weak self] _, index in
+            guard let self, index != 0 else { return }
+            self.frameGenerationEngineDropdown.selectItem(at: 0)
+            self.setStatus("Lossless FG cannot run on Mac yet. MetalDuck keeps using its own frame generation.")
+        }
+
         samplingControl.target = self
         samplingControl.action = #selector(handleSamplingChanged)
 
@@ -448,7 +459,7 @@ final class ControlPanelView: NSView {
         artifactGuardControl.target = self
         artifactGuardControl.action = #selector(handleArtifactGuardChanged)
 
-        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown] as [NSView] {
+        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown, frameGenerationEngineDropdown] as [NSView] {
             control.widthAnchor.constraint(equalToConstant: GlassMetrics.controlWidth).isActive = true
         }
 
@@ -976,6 +987,7 @@ final class ControlPanelView: NSView {
         outputTargetLabel.alignment = .right
         outputTargetLabel.setContentHuggingPriority(.required, for: .horizontal)
         outputTargetLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        group.addRow(SettingRow.control("Engine", symbol: "cpu", help: "MetalDuck builds in-between frames with Vision optical flow and its own Metal shaders. Lossless FG would run Lossless Scaling's shaders from your Lossless.dll; it is not available on Mac yet.", control: frameGenerationEngineDropdown))
         group.addRow(SettingRow.control("Multiplier", symbol: "sparkles", help: "2×, 3× and 4× mean that many presented frames per captured frame.", control: frameGenerationControl))
         group.addRow(SettingRow.control("Output", symbol: "gauge.with.dots.needle.67percent", help: "The frame rate MetalDuck presents: capture rate × multiplier. It follows the multiplier, so there is no separate limit to guess.", control: outputTargetLabel))
         group.addRow(SettingRow.control("Artifact guard", symbol: "shield.lefthalf.filled", help: "In fast action, in-between frames can tear or show see-through copies of what moves. Balanced and Strong keep those moments closer to the real frames: clean, a little less smooth there. Calm scenes are not affected.", control: artifactGuardControl))
