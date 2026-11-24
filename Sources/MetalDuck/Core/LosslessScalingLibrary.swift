@@ -50,6 +50,35 @@ enum LosslessScalingLibrary {
         return FileManager.default.fileExists(atPath: folder.path) ? folder : nil
     }
 
+    /// `Lossless.dll` in the Steam download folder, if Steam has downloaded it.
+    static var steamDownloadedFile: URL? {
+        guard let file = steamDownloadFolder?.appendingPathComponent(fileName),
+              FileManager.default.fileExists(atPath: file.path) else { return nil }
+        return file
+    }
+
+    /// Imports the Steam copy when nothing is imported yet or Steam has a newer one.
+    /// Returns `true` when it imported a file.
+    @discardableResult
+    static func importFromSteamIfNeeded() -> Bool {
+        guard let source = steamDownloadedFile else { return false }
+        if let installed = modificationDate(installedURL),
+           let downloaded = modificationDate(source),
+           downloaded <= installed {
+            return false
+        }
+        do {
+            try importFile(from: source)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func modificationDate(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
     /// Checks that `source` is a PE image and copies it over any earlier import.
     static func importFile(from source: URL) throws {
         guard source.lastPathComponent.caseInsensitiveCompare(fileName) == .orderedSame else {

@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didBootstrap = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        LosslessScalingLibrary.importFromSteamIfNeeded()
         bootstrapIfNeeded()
     }
 

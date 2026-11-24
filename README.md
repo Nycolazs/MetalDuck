@@ -41,14 +41,14 @@ The overlay follows the source and ignores mouse clicks, so you keep playing or 
 
 MetalDuck can keep your own copy of `Lossless.dll` from [Lossless Scaling](https://store.steampowered.com/app/993090/) on Steam. It is not bundled; you need the app in your Steam library.
 
-1. Open **Settings** and click **Open** next to *Steam console*. This opens `steam://open/console` in the Steam client and copies the command below.
+1. In the **Frame Generation** card, click **Steam Console** on the *Lossless.dll* row. This opens `steam://open/console` in the Steam client and copies the command below.
 2. Paste and run it in the console:
 
    ```
    download_depot 993090 993091
    ```
 
-3. When Steam prints the download folder, click **Import…** next to *Lossless.dll* and pick the file. MetalDuck copies it to `~/Library/Application Support/MetalDuck/Lossless.dll`.
+3. When Steam finishes, MetalDuck imports the file on its own, at launch or when you switch back to it, from `~/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamapps/content/app_993090/depot_993091/`. It keeps its copy at `~/Library/Application Support/MetalDuck/Lossless.dll` and imports again when Steam downloads a newer one. **Import…** on the same row picks a copy from somewhere else.
 
 ## Using it
 
