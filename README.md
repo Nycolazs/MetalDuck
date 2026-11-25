@@ -49,6 +49,16 @@ MetalDuck can keep your own copy of `Lossless.dll` from [Lossless Scaling](https
    ```
 
 3. When Steam finishes, MetalDuck imports the file on its own, at launch or when you switch back to it, from `~/Library/Application Support/Steam/Steam.AppBundle/Steam/Contents/MacOS/steamapps/content/app_993090/depot_993091/`. It keeps its copy at `~/Library/Application Support/MetalDuck/Lossless.dll` and imports again when Steam downloads a newer one. **Import…** on the same row picks a copy from somewhere else.
+4. Set **Engine** to **Lossless FG**. MetalDuck reads LSFG 3.1's shaders from your `Lossless.dll`, translates them to Metal with [SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) inside the app, and runs them on your GPU with [lsfg-metal](https://github.com/MaximKotliar/lsfg-metal) (MIT), the engine behind [Lightscale](https://github.com/MaximKotliar/lightscale). The first start in a session takes a second or two. If it fails, MetalDuck says why and goes back to its own engine. **Multiplier** sets how many frames LSFG builds between two captures.
+
+Two rows under Engine tune it, as in lsfg-vk:
+
+- **LSFG mode:** *Quality*, or *Performance*, which uses half of LSFG's feature channels: faster, a little softer.
+- **Flow scale:** resolution of the motion search, 25–100% of the capture. Lower is faster.
+
+On an M-series Mac at 1080p and 2×, LSFG takes about 2.1 ms of GPU time per real frame in Quality at 100%, and 0.8 ms in Performance at 50%.
+
+The shaders stay on your Mac: MetalDuck neither ships nor uploads them.
 
 ## Using it
 

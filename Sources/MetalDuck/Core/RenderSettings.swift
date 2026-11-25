@@ -52,6 +52,14 @@ enum ArtifactGuard: String, Codable, Equatable, CaseIterable {
     }
 }
 
+/// Which shaders build the in-between frames.
+enum FrameGenerationEngineKind: String, Codable, Equatable, CaseIterable {
+    /// Vision optical flow and MetalDuck's own Metal shaders.
+    case metalDuck = "MetalDuck"
+    /// Lossless Scaling's LSFG shaders, read from the user's Lossless.dll.
+    case lossless = "Lossless FG"
+}
+
 struct RenderSettings: Codable, Equatable {
     var upscalingAlgorithm: UpscalingAlgorithm
     var outputScale: Float
@@ -65,6 +73,11 @@ struct RenderSettings: Codable, Equatable {
     var frameGenerationEnabled: Bool
     var frameGenerationMode: FrameGenerationMode
     var artifactGuard: ArtifactGuard
+    var frameGenerationEngine: FrameGenerationEngineKind
+    /// Lossless FG: LSFG 3.1's performance mode (half the feature channels: faster, a little softer).
+    var losslessPerformance: Bool
+    /// Lossless FG: resolution of the motion search relative to the capture, 0.25...1.0.
+    var losslessFlowScale: Float
 
     init(
         upscalingAlgorithm: UpscalingAlgorithm = .metalFXSpatial,
@@ -78,7 +91,10 @@ struct RenderSettings: Codable, Equatable {
         targetPresentationFPS: Int = 120,
         frameGenerationEnabled: Bool = true,
         frameGenerationMode: FrameGenerationMode = .x4,
-        artifactGuard: ArtifactGuard = .balanced
+        artifactGuard: ArtifactGuard = .balanced,
+        frameGenerationEngine: FrameGenerationEngineKind = .metalDuck,
+        losslessPerformance: Bool = false,
+        losslessFlowScale: Float = 1.0
     ) {
         self.upscalingAlgorithm = upscalingAlgorithm
         self.outputScale = outputScale
@@ -92,15 +108,20 @@ struct RenderSettings: Codable, Equatable {
         self.frameGenerationEnabled = frameGenerationEnabled
         self.frameGenerationMode = frameGenerationMode
         self.artifactGuard = artifactGuard
+        self.frameGenerationEngine = frameGenerationEngine
+        self.losslessPerformance = losslessPerformance
+        self.losslessFlowScale = losslessFlowScale
     }
 
     private enum CodingKeys: String, CodingKey {
         case upscalingAlgorithm, outputScale, matchOutputResolution, samplingMode, sharpness
         case dynamicResolutionEnabled, dynamicScaleMinimum, dynamicScaleMaximum
         case targetPresentationFPS, frameGenerationEnabled, frameGenerationMode, artifactGuard
+        case frameGenerationEngine, losslessPerformance, losslessFlowScale
     }
 
-    /// Profiles saved before the artifact guard existed load with it on (balanced).
+    /// Profiles saved before the artifact guard existed load with it on (balanced), and
+    /// profiles saved before the engine choice existed use MetalDuck's engine.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         upscalingAlgorithm = try container.decode(UpscalingAlgorithm.self, forKey: .upscalingAlgorithm)
@@ -115,6 +136,9 @@ struct RenderSettings: Codable, Equatable {
         frameGenerationEnabled = try container.decode(Bool.self, forKey: .frameGenerationEnabled)
         frameGenerationMode = try container.decode(FrameGenerationMode.self, forKey: .frameGenerationMode)
         artifactGuard = try container.decodeIfPresent(ArtifactGuard.self, forKey: .artifactGuard) ?? .balanced
+        frameGenerationEngine = try container.decodeIfPresent(FrameGenerationEngineKind.self, forKey: .frameGenerationEngine) ?? .metalDuck
+        losslessPerformance = try container.decodeIfPresent(Bool.self, forKey: .losslessPerformance) ?? false
+        losslessFlowScale = try container.decodeIfPresent(Float.self, forKey: .losslessFlowScale) ?? 1.0
     }
 }
 
@@ -263,6 +287,18 @@ final class SettingsStore {
     var artifactGuard: ArtifactGuard {
         get { snapshot().artifactGuard }
         set { update { $0.artifactGuard = newValue } }
+    }
+    var frameGenerationEngine: FrameGenerationEngineKind {
+        get { snapshot().frameGenerationEngine }
+        set { update { $0.frameGenerationEngine = newValue } }
+    }
+    var losslessPerformance: Bool {
+        get { snapshot().losslessPerformance }
+        set { update { $0.losslessPerformance = newValue } }
+    }
+    var losslessFlowScale: Float {
+        get { snapshot().losslessFlowScale }
+        set { update { $0.losslessFlowScale = newValue } }
     }
 
     var shortcut: ShortcutSettings {

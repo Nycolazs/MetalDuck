@@ -1,0 +1,22 @@
+{
+  "originHash" : "3652885b5440db2b23529213d081200b0dc21bd9e6faff54f20cdf15bc976827",
+  "pins" : [
+    {
+      "identity" : "lsfg-metal",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kwanLeeFrmVi/lsfg-metal.git",
+      "state" : {
+        "revision" : "ca7d9be15ee6e07025cb315ba77729870d6ca454"
+      }
+    },
+    {
+      "identity" : "spirv-cross",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/KhronosGroup/SPIRV-Cross.git",
+      "state" : {
+        "revision" : "f11ba9f0b21ba8fc15153d50a2a1ae31ab1cf8f7"
+      }
+    }
+  ],
+  "version" : 3
+}

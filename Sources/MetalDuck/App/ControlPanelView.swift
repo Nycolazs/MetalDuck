@@ -54,6 +54,9 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didToggleFrameGeneration enabled: Bool)
     func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationMode mode: FrameGenerationMode)
     func controlPanel(_ panel: ControlPanelView, didChangeArtifactGuard value: ArtifactGuard)
+    func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationEngine engine: FrameGenerationEngineKind)
+    func controlPanel(_ panel: ControlPanelView, didChangeLosslessPerformance performance: Bool)
+    func controlPanel(_ panel: ControlPanelView, didChangeLosslessFlowScale value: Float)
     func controlPanel(_ panel: ControlPanelView, didToggleHUD visible: Bool)
 
     func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID)
@@ -117,9 +120,11 @@ final class ControlPanelView: NSView {
 
     // Scaling
     private let upscalerDropdown = CompactDropdown()
-    /// Only the built-in engine runs today; Lossless FG is listed so users can see it is planned.
     private let frameGenerationEngineDropdown = CompactDropdown()
-    private static let frameGenerationEngines = ["MetalDuck", "Lossless FG (not available yet)"]
+    // Lossless FG only.
+    private let losslessModeControl = GlassSegmented.make(["Quality", "Performance"])
+    private let losslessFlowSlider = NSSlider(value: 1.0, minValue: 0.25, maxValue: 1.0, target: nil, action: nil)
+    private let losslessFlowValueLabel = NSTextField(labelWithString: "100%")
     private let outputScaleSlider = NSSlider(value: 1.5, minValue: 0.75, maxValue: 3.0, target: nil, action: nil)
     private let outputScaleValueLabel = NSTextField(labelWithString: "1.50×")
     private let matchOutputResolutionSwitch = GlassSwitch()
@@ -222,6 +227,11 @@ final class ControlPanelView: NSView {
             frameGenerationControl.selectedSegment = 0
         }
         artifactGuardControl.selectedSegment = ArtifactGuard.allCases.firstIndex(of: settings.artifactGuard) ?? 1
+        frameGenerationEngineDropdown.selectItem(at: FrameGenerationEngineKind.allCases.firstIndex(of: settings.frameGenerationEngine) ?? 0)
+        losslessModeControl.selectedSegment = settings.losslessPerformance ? 1 : 0
+        losslessFlowSlider.floatValue = settings.losslessFlowScale
+        losslessFlowValueLabel.stringValue = String(format: "%.0f%%", settings.losslessFlowScale * 100)
+        setLosslessControlsEnabled(settings.frameGenerationEngine == .lossless)
 
         captureCursorSwitch.isOn = capture.showsCursor
         captureFPSSlider.integerValue = capture.framesPerSecond
@@ -442,13 +452,27 @@ final class ControlPanelView: NSView {
             self.delegate?.controlPanel(self, didChangeUpscalingAlgorithm: value)
         }
 
-        frameGenerationEngineDropdown.items = Self.frameGenerationEngines
+        frameGenerationEngineDropdown.items = FrameGenerationEngineKind.allCases.map(\.rawValue)
         frameGenerationEngineDropdown.selectItem(at: 0)
         frameGenerationEngineDropdown.onSelectionChanged = { [weak self] _, index in
-            guard let self, index != 0 else { return }
-            self.frameGenerationEngineDropdown.selectItem(at: 0)
-            self.setStatus("Lossless FG cannot run on Mac yet. MetalDuck keeps using its own frame generation.")
+            guard let self, !self.isApplyingValues else { return }
+            let engines = FrameGenerationEngineKind.allCases
+            guard engines.indices.contains(index) else { return }
+            let engine = engines[index]
+            if engine == .lossless, LosslessScalingLibrary.installedSize == nil {
+                self.frameGenerationEngineDropdown.selectItem(at: 0)
+                self.setStatus("Lossless FG needs Lossless.dll. Download it with Steam Console, or use Import…", isError: true)
+                return
+            }
+            self.setLosslessControlsEnabled(engine == .lossless)
+            self.delegate?.controlPanel(self, didChangeFrameGenerationEngine: engine)
         }
+
+        losslessModeControl.target = self
+        losslessModeControl.action = #selector(handleLosslessModeChanged)
+        // Steps of 25%, so each change rebuilds LSFG's textures once, not on every drag tick.
+        losslessFlowSlider.numberOfTickMarks = 4
+        losslessFlowSlider.allowsTickMarkValuesOnly = true
 
         samplingControl.target = self
         samplingControl.action = #selector(handleSamplingChanged)
@@ -459,7 +483,7 @@ final class ControlPanelView: NSView {
         artifactGuardControl.target = self
         artifactGuardControl.action = #selector(handleArtifactGuardChanged)
 
-        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown, frameGenerationEngineDropdown] as [NSView] {
+        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown, frameGenerationEngineDropdown, losslessModeControl] as [NSView] {
             control.widthAnchor.constraint(equalToConstant: GlassMetrics.controlWidth).isActive = true
         }
 
@@ -485,6 +509,7 @@ final class ControlPanelView: NSView {
             (queueDepthSlider, #selector(handleQueueDepthChanged)),
             (outputScaleSlider, #selector(handleOutputScaleChanged)),
             (sharpnessSlider, #selector(handleSharpnessChanged)),
+            (losslessFlowSlider, #selector(handleLosslessFlowScaleChanged)),
             (dynamicMinSlider, #selector(handleDynamicMinChanged)),
             (dynamicMaxSlider, #selector(handleDynamicMaxChanged))
         ]
@@ -497,7 +522,7 @@ final class ControlPanelView: NSView {
 
     private func applySliderAccent() {
         let color = GlassAccent.color
-        for slider in [captureFPSSlider, queueDepthSlider, outputScaleSlider, sharpnessSlider, dynamicMinSlider, dynamicMaxSlider] {
+        for slider in [captureFPSSlider, queueDepthSlider, outputScaleSlider, sharpnessSlider, losslessFlowSlider, dynamicMinSlider, dynamicMaxSlider] {
             slider.trackFillColor = color
         }
     }
@@ -987,7 +1012,9 @@ final class ControlPanelView: NSView {
         outputTargetLabel.alignment = .right
         outputTargetLabel.setContentHuggingPriority(.required, for: .horizontal)
         outputTargetLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        group.addRow(SettingRow.control("Engine", symbol: "cpu", help: "MetalDuck builds in-between frames with Vision optical flow and its own Metal shaders. Lossless FG would run Lossless Scaling's shaders from your Lossless.dll; it is not available on Mac yet.", control: frameGenerationEngineDropdown))
+        group.addRow(SettingRow.control("Engine", symbol: "cpu", help: "MetalDuck builds in-between frames with Vision optical flow and its own Metal shaders. Lossless FG runs Lossless Scaling's LSFG shaders from your own Lossless.dll, translated to Metal on this Mac.", control: frameGenerationEngineDropdown))
+        group.addRow(SettingRow.control("LSFG mode", symbol: "speedometer", help: "Lossless FG only. Performance uses half of LSFG's feature channels: faster, a little softer.", control: losslessModeControl))
+        group.addRow(SettingRow.slider("Flow scale", symbol: "scope", help: "Lossless FG only. Resolution of the motion search relative to the capture. Lower is faster; 100% follows motion most closely.", slider: losslessFlowSlider, value: losslessFlowValueLabel))
         group.addRow(SettingRow.control("Multiplier", symbol: "sparkles", help: "2×, 3× and 4× mean that many presented frames per captured frame.", control: frameGenerationControl))
         group.addRow(SettingRow.control("Output", symbol: "gauge.with.dots.needle.67percent", help: "The frame rate MetalDuck presents: capture rate × multiplier. It follows the multiplier, so there is no separate limit to guess.", control: outputTargetLabel))
         group.addRow(SettingRow.control("Artifact guard", symbol: "shield.lefthalf.filled", help: "In fast action, in-between frames can tear or show see-through copies of what moves. Balanced and Strong keep those moments closer to the real frames: clean, a little less smooth there. Calm scenes are not affected.", control: artifactGuardControl))
@@ -1250,6 +1277,24 @@ final class ControlPanelView: NSView {
     @objc private func handleMatchOutputResolutionChanged() {
         guard !isApplyingValues else { return }
         delegate?.controlPanel(self, didToggleMatchOutputResolution: matchOutputResolutionSwitch.isOn)
+    }
+
+    @objc private func handleLosslessModeChanged() {
+        guard !isApplyingValues else { return }
+        delegate?.controlPanel(self, didChangeLosslessPerformance: losslessModeControl.selectedSegment == 1)
+    }
+
+    @objc private func handleLosslessFlowScaleChanged() {
+        guard !isApplyingValues else { return }
+        let value = losslessFlowSlider.floatValue
+        losslessFlowValueLabel.stringValue = String(format: "%.0f%%", value * 100)
+        delegate?.controlPanel(self, didChangeLosslessFlowScale: value)
+    }
+
+    private func setLosslessControlsEnabled(_ enabled: Bool) {
+        losslessModeControl.isEnabled = enabled
+        losslessFlowSlider.isEnabled = enabled
+        losslessFlowValueLabel.textColor = enabled ? .secondaryLabelColor : .tertiaryLabelColor
     }
 
     @objc private func handleSharpnessChanged() {
