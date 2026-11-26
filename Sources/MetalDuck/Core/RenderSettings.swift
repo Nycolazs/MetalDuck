@@ -203,7 +203,7 @@ struct ShortcutSettings: Codable, Equatable {
 
 final class SettingsStore {
     private let lock = NSLock()
-    private var settings = RenderSettings(
+    private var settings: RenderSettings = SettingsStore.withLosslessPreferences(RenderSettings(
         upscalingAlgorithm: .metalFXSpatial,
         outputScale: 1.0,
         matchOutputResolution: true,
@@ -215,7 +215,34 @@ final class SettingsStore {
         targetPresentationFPS: 120,
         frameGenerationEnabled: true,
         frameGenerationMode: .x4
-    )
+    ))
+
+    /// Engine choice, LSFG mode and flow scale belong to the Mac (whether Lossless.dll is set up),
+    /// not to a profile, and profile edits are not saved; so they are kept app-wide.
+    private struct LosslessPreferences: Codable, Equatable {
+        var engine: FrameGenerationEngineKind
+        var performance: Bool
+        var flowScale: Float
+    }
+    private static let losslessPreferencesKey = "com.metalduck.losslessPreferences"
+
+    private static func withLosslessPreferences(_ settings: RenderSettings) -> RenderSettings {
+        guard let data = UserDefaults.standard.data(forKey: losslessPreferencesKey),
+              let saved = try? JSONDecoder().decode(LosslessPreferences.self, from: data) else { return settings }
+        var settings = settings
+        settings.frameGenerationEngine = saved.engine
+        settings.losslessPerformance = saved.performance
+        settings.losslessFlowScale = saved.flowScale
+        return settings
+    }
+
+    private static func preferences(of settings: RenderSettings) -> LosslessPreferences {
+        LosslessPreferences(
+            engine: settings.frameGenerationEngine,
+            performance: settings.losslessPerformance,
+            flowScale: settings.losslessFlowScale
+        )
+    }
 
     private var shortcutSettings: ShortcutSettings = {
         if let data = UserDefaults.standard.data(forKey: "com.metalduck.shortcut"),
@@ -235,7 +262,12 @@ final class SettingsStore {
     func update(action: (inout RenderSettings) -> Void) -> RenderSettings {
         lock.lock()
         defer { lock.unlock() }
+        let before = Self.preferences(of: settings)
         action(&settings)
+        let after = Self.preferences(of: settings)
+        if after != before, let data = try? JSONEncoder().encode(after) {
+            UserDefaults.standard.set(data, forKey: Self.losslessPreferencesKey)
+        }
         return settings
     }
     

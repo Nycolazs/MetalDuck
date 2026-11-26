@@ -558,10 +558,8 @@ final class MainViewController: NSViewController {
         settingsStore.frameGenerationEnabled = settings.frameGenerationEnabled
         settingsStore.frameGenerationMode = settings.frameGenerationMode
         settingsStore.artifactGuard = settings.artifactGuard
-        settingsStore.frameGenerationEngine = settings.frameGenerationEngine
-        settingsStore.losslessPerformance = settings.losslessPerformance
-        settingsStore.losslessFlowScale = settings.losslessFlowScale
-        if settings.frameGenerationEngine == .lossless {
+        // Engine, LSFG mode and flow scale are app-wide (SettingsStore keeps them), not per profile.
+        if settingsStore.frameGenerationEngine == .lossless {
             prepareLosslessEngine()
         }
     }
@@ -849,8 +847,13 @@ extension MainViewController: ControlPanelViewDelegate {
         panel.setStatus(String(format: "Flow scale: %.0f%%", value * 100))
     }
 
-    /// Builds Lossless FG from Lossless.dll; on failure, goes back to MetalDuck's engine.
+    /// Builds Lossless FG from Lossless.dll. Until it is ready, or if it fails, frames come from
+    /// MetalDuck's engine; the choice stays, so the Lossless rows stay open to fix the cause.
     private func prepareLosslessEngine() {
+        guard LosslessScalingLibrary.installedSize != nil else {
+            controlPanel.setStatus("Lossless FG needs Lossless.dll: Steam Console downloads it, Import… picks a copy. MetalDuck's engine runs until then.", isError: true)
+            return
+        }
         controlPanel.setStatus("Building Lossless FG from Lossless.dll…")
         renderer.prepareLosslessEngine { [weak self] result in
             guard let self, self.settingsStore.frameGenerationEngine == .lossless else { return }
@@ -858,8 +861,7 @@ extension MainViewController: ControlPanelViewDelegate {
             case .success:
                 self.controlPanel.setStatus("Engine: Lossless FG")
             case .failure(let error):
-                self.updateRenderSettings(syncUI: true) { $0.frameGenerationEngine = .metalDuck }
-                self.controlPanel.setStatus("Lossless FG could not start: \(error.localizedDescription)", isError: true)
+                self.controlPanel.setStatus("Lossless FG could not start: \(error.localizedDescription) MetalDuck's engine runs meanwhile.", isError: true)
             }
         }
     }

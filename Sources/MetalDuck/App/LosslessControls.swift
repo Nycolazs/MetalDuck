@@ -9,6 +9,8 @@ import UniformTypeIdentifiers
 @MainActor
 final class LosslessControls: NSStackView {
     private let statusLabel = GlassLabel.make("", font: GlassFont.value, color: .secondaryLabelColor)
+    /// Called when a Lossless.dll arrives where there was none (from Steam or Import…).
+    var onImported: (() -> Void)?
     private var activationObserver: NSObjectProtocol?
 
     init() {
@@ -54,8 +56,10 @@ final class LosslessControls: NSStackView {
     }
 
     private func syncFromSteam() {
+        let hadFile = LosslessScalingLibrary.installedSize != nil
         LosslessScalingLibrary.importFromSteamIfNeeded()
         refreshStatus()
+        if !hadFile, LosslessScalingLibrary.installedSize != nil { onImported?() }
     }
 
     private func refreshStatus() {
@@ -98,6 +102,7 @@ final class LosslessControls: NSStackView {
             do {
                 try LosslessScalingLibrary.importFile(from: url)
                 self.refreshStatus()
+                self.onImported?()
             } catch {
                 self.showAlert(title: "Could not import Lossless.dll", message: error.localizedDescription)
             }

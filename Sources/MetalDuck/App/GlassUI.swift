@@ -621,14 +621,19 @@ class FlippedView: NSView {
 final class SettingsGroup: NSView {
     private let rows = NSStackView()
 
-    init(title: String, symbol: String) {
+    /// `info`: what each setting in the group does, shown by an (i) button next to the title.
+    init(title: String, symbol: String, info: [InfoButton.Entry] = []) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        let header = NSStackView(views: [
+        var headerViews = [
             GlassSymbol.view(symbol, size: 12, weight: .semibold),
             GlassLabel.make(title, font: GlassFont.groupTitle, color: .secondaryLabelColor)
-        ])
+        ]
+        if !info.isEmpty {
+            headerViews.append(InfoButton(title: title, entries: info))
+        }
+        let header = NSStackView(views: headerViews)
         header.translatesAutoresizingMaskIntoConstraints = false
         header.orientation = .horizontal
         header.alignment = .centerY
@@ -676,6 +681,15 @@ final class SettingsGroup: NSView {
         rows.addArrangedSubview(view)
         view.leadingAnchor.constraint(equalTo: rows.leadingAnchor).isActive = true
         view.trailingAnchor.constraint(equalTo: rows.trailingAnchor).isActive = true
+    }
+
+    /// Shows or hides a row together with the hairline above it.
+    func setRow(_ view: NSView, hidden: Bool) {
+        view.isHidden = hidden
+        if let index = rows.arrangedSubviews.firstIndex(of: view), index > 0,
+           rows.arrangedSubviews[index - 1] is SeparatorLine {
+            rows.arrangedSubviews[index - 1].isHidden = hidden
+        }
     }
 }
 
@@ -1454,6 +1468,95 @@ private final class SidebarSelectionIndicator: AppearanceLayerView {
 final class HandCursorButton: NSButton {
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
+/// An (i) button that explains a group's settings in a popover.
+@MainActor
+final class InfoButton: NSButton {
+    struct Entry {
+        let term: String
+        let text: String
+        init(_ term: String, _ text: String) {
+            self.term = term
+            self.text = text
+        }
+    }
+
+    private let heading: String
+    private let entries: [Entry]
+    private var popover: NSPopover?
+
+    init(title: String, entries: [Entry]) {
+        heading = title
+        self.entries = entries
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "About \(title) settings")
+        imagePosition = .imageOnly
+        isBordered = false
+        contentTintColor = .secondaryLabelColor
+        toolTip = "What the \(title) settings do"
+        target = self
+        action = #selector(toggle)
+        setAccessibilityLabel("About \(title) settings")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    @objc private func toggle() {
+        if let popover, popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = Self.contentController(heading: heading, entries: entries)
+        popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
+        self.popover = popover
+    }
+
+    /// Heading, then each setting's name in bold followed by what it does.
+    static func contentController(heading: String, entries: [Entry]) -> NSViewController {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.paragraphSpacing = 8
+        let text = NSMutableAttributedString()
+        for entry in entries {
+            text.append(NSAttributedString(string: entry.term + "  ", attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph
+            ]))
+            text.append(NSAttributedString(string: entry.text + (entry.term == entries.last?.term ? "" : "\n"), attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .paragraphStyle: paragraph
+            ]))
+        }
+
+        let title = GlassLabel.make(heading, font: GlassFont.groupTitle)
+        let body = NSTextField(labelWithAttributedString: text)
+        body.lineBreakMode = .byWordWrapping
+        body.maximumNumberOfLines = 0
+        body.preferredMaxLayoutWidth = 320
+        body.isSelectable = true
+        let stack = NSStackView(views: [title, body])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+        body.widthAnchor.constraint(equalToConstant: 320).isActive = true
+
+        let controller = NSViewController()
+        controller.view = stack
+        return controller
     }
 }
 

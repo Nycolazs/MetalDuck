@@ -125,6 +125,9 @@ final class ControlPanelView: NSView {
     private let losslessModeControl = GlassSegmented.make(["Quality", "Performance"])
     private let losslessFlowSlider = NSSlider(value: 1.0, minValue: 0.25, maxValue: 1.0, target: nil, action: nil)
     private let losslessFlowValueLabel = NSTextField(labelWithString: "100%")
+    private var frameGenerationGroup: SettingsGroup?
+    /// Rows shown only while the engine is Lossless FG.
+    private var losslessRows: [NSView] = []
     private let outputScaleSlider = NSSlider(value: 1.5, minValue: 0.75, maxValue: 3.0, target: nil, action: nil)
     private let outputScaleValueLabel = NSTextField(labelWithString: "1.50×")
     private let matchOutputResolutionSwitch = GlassSwitch()
@@ -231,7 +234,7 @@ final class ControlPanelView: NSView {
         losslessModeControl.selectedSegment = settings.losslessPerformance ? 1 : 0
         losslessFlowSlider.floatValue = settings.losslessFlowScale
         losslessFlowValueLabel.stringValue = String(format: "%.0f%%", settings.losslessFlowScale * 100)
-        setLosslessControlsEnabled(settings.frameGenerationEngine == .lossless)
+        setLosslessRowsVisible(settings.frameGenerationEngine == .lossless)
 
         captureCursorSwitch.isOn = capture.showsCursor
         captureFPSSlider.integerValue = capture.framesPerSecond
@@ -459,12 +462,7 @@ final class ControlPanelView: NSView {
             let engines = FrameGenerationEngineKind.allCases
             guard engines.indices.contains(index) else { return }
             let engine = engines[index]
-            if engine == .lossless, LosslessScalingLibrary.installedSize == nil {
-                self.frameGenerationEngineDropdown.selectItem(at: 0)
-                self.setStatus("Lossless FG needs Lossless.dll. Download it with Steam Console, or use Import…", isError: true)
-                return
-            }
-            self.setLosslessControlsEnabled(engine == .lossless)
+            self.setLosslessRowsVisible(engine == .lossless)
             self.delegate?.controlPanel(self, didChangeFrameGenerationEngine: engine)
         }
 
@@ -918,7 +916,13 @@ final class ControlPanelView: NSView {
     }
 
     private func makeCaptureGroup() -> NSView {
-        let group = SettingsGroup(title: "Capture", symbol: "camera.viewfinder")
+        let group = SettingsGroup(title: "Capture", symbol: "camera.viewfinder", info: [
+            .init("Mode", "Window captures one app window, Display a whole screen. Auto picks for you."),
+            .init("Window", "The window or display to capture. The round arrow refreshes the list."),
+            .init("Show cursor", "Includes the mouse pointer in the captured picture."),
+            .init("Capture rate", "Frames per second MetalDuck takes from the source. Match the source (30 for most video, 60 for many games); frame generation multiplies it."),
+            .init("Queue depth", "Frames held ready. Higher is steadier; lower adds less delay."),
+        ])
 
         let modeIcon = GlassSymbol.view("rectangle.on.rectangle", size: 13)
         let modeTitle = GlassLabel.make("Mode", font: GlassFont.body)
@@ -1008,24 +1012,47 @@ final class ControlPanelView: NSView {
     }
 
     private func makeFrameGenerationGroup() -> NSView {
-        let group = SettingsGroup(title: "Frame Generation", symbol: "sparkles.rectangle.stack")
+        let group = SettingsGroup(title: "Frame Generation", symbol: "sparkles.rectangle.stack", info: [
+            .init("Engine", "Builds the frames in between captures. MetalDuck uses Apple's Vision optical flow; Lossless FG runs Lossless Scaling's LSFG 3.1 from your own Lossless.dll."),
+            .init("Lossless.dll", "Lossless FG only. Your copy of Lossless Scaling's library: imported on its own from Steam's download folder, or picked with Import…."),
+            .init("Steam download", "Lossless FG only. Steam Console opens Steam's console and copies this command; paste it there to download Lossless Scaling's files. Needs Lossless Scaling in your Steam library."),
+            .init("LSFG mode", "Lossless FG only. Quality, or Performance: about a third less GPU time, a little softer."),
+            .init("Flow scale", "Lossless FG only. Resolution of the motion search. Lower is faster; 100% follows motion most closely."),
+            .init("Multiplier", "Frames shown per captured frame: 2× doubles the frame rate. Off shows the captures as they are."),
+            .init("Output", "The resulting frame rate: capture rate × multiplier."),
+            .init("Artifact guard", "MetalDuck engine. In fast action, keeps in-between frames closer to the real ones, so fewer tears and see-through copies."),
+            .init("Stats overlay", "Shows capture, generated and output FPS on the scaled window."),
+        ])
         outputTargetLabel.alignment = .right
         outputTargetLabel.setContentHuggingPriority(.required, for: .horizontal)
         outputTargetLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         group.addRow(SettingRow.control("Engine", symbol: "cpu", help: "MetalDuck builds in-between frames with Vision optical flow and its own Metal shaders. Lossless FG runs Lossless Scaling's LSFG shaders from your own Lossless.dll, translated to Metal on this Mac.", control: frameGenerationEngineDropdown))
-        group.addRow(SettingRow.control("LSFG mode", symbol: "speedometer", help: "Lossless FG only. Performance uses half of LSFG's feature channels: faster, a little softer.", control: losslessModeControl))
-        group.addRow(SettingRow.slider("Flow scale", symbol: "scope", help: "Lossless FG only. Resolution of the motion search relative to the capture. Lower is faster; 100% follows motion most closely.", slider: losslessFlowSlider, value: losslessFlowValueLabel))
+        let dllControls = LosslessControls()
+        dllControls.onImported = { [weak self] in self?.handleLosslessImported() }
+        losslessRows = [
+            SettingRow.control("Lossless.dll", symbol: "shippingbox", help: "Your own Lossless.dll from Lossless Scaling on Steam (app 993090). Steam Console opens the console and copies the download command; MetalDuck imports the file from Steam's download folder on its own.", control: dllControls),
+            SettingRow.control("Steam download", symbol: "terminal", help: "Paste this in the Steam console to download Lossless Scaling's files. Requires Lossless Scaling in your Steam library.", control: LosslessCommandControl()),
+            SettingRow.control("LSFG mode", symbol: "speedometer", help: "Performance uses half of LSFG's feature channels: faster, a little softer.", control: losslessModeControl),
+            SettingRow.slider("Flow scale", symbol: "scope", help: "Resolution of the motion search relative to the capture. Lower is faster; 100% follows motion most closely.", slider: losslessFlowSlider, value: losslessFlowValueLabel),
+        ]
+        losslessRows.forEach(group.addRow)
         group.addRow(SettingRow.control("Multiplier", symbol: "sparkles", help: "2×, 3× and 4× mean that many presented frames per captured frame.", control: frameGenerationControl))
         group.addRow(SettingRow.control("Output", symbol: "gauge.with.dots.needle.67percent", help: "The frame rate MetalDuck presents: capture rate × multiplier. It follows the multiplier, so there is no separate limit to guess.", control: outputTargetLabel))
         group.addRow(SettingRow.control("Artifact guard", symbol: "shield.lefthalf.filled", help: "In fast action, in-between frames can tear or show see-through copies of what moves. Balanced and Strong keep those moments closer to the real frames: clean, a little less smooth there. Calm scenes are not affected.", control: artifactGuardControl))
         group.addRow(SettingRow.control("Stats overlay", symbol: "chart.bar.xaxis", help: "Show capture, generated and output FPS in the corner of the scaled window.", control: hudSwitch))
-        group.addRow(SettingRow.control("Lossless.dll", symbol: "shippingbox", help: "Your own Lossless.dll from Lossless Scaling on Steam (app 993090). Steam Console opens the console and copies the download command; MetalDuck imports the file from Steam's download folder on its own.", control: LosslessControls()))
-        group.addRow(SettingRow.control("Steam download", symbol: "terminal", help: "Paste this in the Steam console to download Lossless Scaling's files. Requires Lossless Scaling in your Steam library.", control: LosslessCommandControl()))
+        frameGenerationGroup = group
+        setLosslessRowsVisible(false)
         return group
     }
 
     private func makeScalingGroup() -> NSView {
-        let group = SettingsGroup(title: "Scaling", symbol: "arrow.up.left.and.arrow.down.right")
+        let group = SettingsGroup(title: "Scaling", symbol: "arrow.up.left.and.arrow.down.right", info: [
+            .init("Upscaler", "How the picture is enlarged. MetalFX uses Apple's upscaler and looks sharper; Native Linear is plain resampling and costs least."),
+            .init("Fit to output", "Scales the source to fill the output window."),
+            .init("Scale factor", "Size of the rendered picture. With Fit to output on, below 1× renders smaller than the window to save GPU time; it never renders larger than the window."),
+            .init("Sampling", "Filter for plain resampling: Nearest keeps hard pixel edges, Linear smooths them."),
+            .init("Sharpness", "Strength of the sharpening pass after scaling. 0 turns it off."),
+        ])
         group.addRow(SettingRow.control("Upscaler", symbol: "wand.and.stars", help: "MetalFX Spatial is sharper; Native Linear is cheaper.", control: upscalerDropdown))
         group.addRow(SettingRow.control("Fit to output", symbol: "display", help: "Scale the source to fill the output window, then apply the factor.", control: matchOutputResolutionSwitch))
         group.addRow(SettingRow.slider("Scale factor", symbol: "plus.magnifyingglass", slider: outputScaleSlider, value: outputScaleValueLabel))
@@ -1035,7 +1062,11 @@ final class ControlPanelView: NSView {
     }
 
     private func makeDynamicResolutionGroup() -> NSView {
-        let group = SettingsGroup(title: "Dynamic Resolution", symbol: "aspectratio")
+        let group = SettingsGroup(title: "Dynamic Resolution", symbol: "aspectratio", info: [
+            .init("Enabled", "When frames take longer than the output rate allows, MetalDuck lowers the render scale a little each frame, and raises it again when there is room."),
+            .init("Minimum", "Lowest scale it may drop to."),
+            .init("Maximum", "Highest scale it may go back up to."),
+        ])
         group.addRow(SettingRow.control("Enabled", symbol: "bolt.badge.automatic", help: "Lower the render scale when output falls behind the target.", control: dynamicResolutionSwitch))
         group.addRow(SettingRow.slider("Minimum", symbol: "arrow.down.right.and.arrow.up.left", slider: dynamicMinSlider, value: dynamicMinValueLabel))
         group.addRow(SettingRow.slider("Maximum", symbol: "arrow.up.left.and.arrow.down.right", slider: dynamicMaxSlider, value: dynamicMaxValueLabel))
@@ -1291,10 +1322,17 @@ final class ControlPanelView: NSView {
         delegate?.controlPanel(self, didChangeLosslessFlowScale: value)
     }
 
-    private func setLosslessControlsEnabled(_ enabled: Bool) {
-        losslessModeControl.isEnabled = enabled
-        losslessFlowSlider.isEnabled = enabled
-        losslessFlowValueLabel.textColor = enabled ? .secondaryLabelColor : .tertiaryLabelColor
+    private func setLosslessRowsVisible(_ visible: Bool) {
+        guard let frameGenerationGroup else { return }
+        for row in losslessRows {
+            frameGenerationGroup.setRow(row, hidden: !visible)
+        }
+    }
+
+    /// A Lossless.dll just arrived: if Lossless FG is selected, start it now.
+    private func handleLosslessImported() {
+        guard frameGenerationEngineDropdown.titleOfSelectedItem == FrameGenerationEngineKind.lossless.rawValue else { return }
+        delegate?.controlPanel(self, didChangeFrameGenerationEngine: .lossless)
     }
 
     @objc private func handleSharpnessChanged() {
