@@ -96,7 +96,18 @@ final class MainViewController: NSViewController {
         updateWindowTitle()
     }
 
+    /// True while capture and scaling run.
+    var isScaling: Bool { renderer.isRunning }
+
     func start() async {
+        // Check Screen Recording now and whenever MetalDuck comes back to the front
+        // (for example after turning it on in System Settings).
+        refreshScreenRecordingPermission()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshScreenRecordingPermission() }
+        }
         await refreshCaptureSources()
         controlPanel.setCaptureMode(selectedCaptureMode)
         applyCaptureTargetSelection()
@@ -418,6 +429,17 @@ final class MainViewController: NSViewController {
         updateWindowTitle()
     }
 
+    private var screenRecordingMissing = false
+
+    private func refreshScreenRecordingPermission() {
+        let granted = CGPreflightScreenCaptureAccess()
+        controlPanel.setScreenRecordingNeeded(!granted)
+        if granted, screenRecordingMissing {
+            controlPanel.setStatus("Screen Recording is on. Ready.")
+        }
+        screenRecordingMissing = !granted
+    }
+
     private func ensureScreenCapturePermission() -> Bool {
         if CGPreflightScreenCaptureAccess() {
             return true
@@ -558,6 +580,10 @@ final class MainViewController: NSViewController {
         settingsStore.frameGenerationEnabled = settings.frameGenerationEnabled
         settingsStore.frameGenerationMode = settings.frameGenerationMode
         settingsStore.artifactGuard = settings.artifactGuard
+        // Engine, LSFG mode and flow scale are app-wide (SettingsStore keeps them), not per profile.
+        if settingsStore.frameGenerationEngine == .lossless {
+            prepareLosslessEngine()
+        }
     }
 
     private func applyCaptureConfiguration(_ config: CaptureConfiguration) {
@@ -611,6 +637,8 @@ extension MainViewController: ControlPanelViewDelegate {
         guard ensureScreenCapturePermission() else {
             PipelineLog.shared.event("session", "start refused: Screen Recording permission denied")
             panel.setStatus("Screen Recording permission denied.", isError: true)
+            panel.setScreenRecordingNeeded(true)
+            screenRecordingMissing = true
             overlayController.setCaptureError("Screen Recording permission denied")
             return
         }
@@ -816,6 +844,50 @@ extension MainViewController: ControlPanelViewDelegate {
             settings.artifactGuard = value
         }
         panel.setStatus("Artifact guard: \(value.rawValue)")
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didChangeFrameGenerationEngine engine: FrameGenerationEngineKind) {
+        updateRenderSettings { settings in
+            settings.frameGenerationEngine = engine
+        }
+        if engine == .lossless {
+            prepareLosslessEngine()
+        } else {
+            panel.setStatus("Engine: MetalDuck")
+        }
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didChangeLosslessPerformance performance: Bool) {
+        updateRenderSettings { settings in
+            settings.losslessPerformance = performance
+        }
+        panel.setStatus("LSFG mode: \(performance ? "Performance" : "Quality")")
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didChangeLosslessFlowScale value: Float) {
+        updateRenderSettings { settings in
+            settings.losslessFlowScale = value
+        }
+        panel.setStatus(String(format: "Flow scale: %.0f%%", value * 100))
+    }
+
+    /// Builds Lossless FG from Lossless.dll. Until it is ready, or if it fails, frames come from
+    /// MetalDuck's engine; the choice stays, so the Lossless rows stay open to fix the cause.
+    private func prepareLosslessEngine() {
+        guard LosslessScalingLibrary.installedSize != nil else {
+            controlPanel.setStatus("Lossless FG needs Lossless.dll: Steam Console downloads it, Import… picks a copy. MetalDuck's engine runs until then.", isError: true)
+            return
+        }
+        controlPanel.setStatus("Building Lossless FG from Lossless.dll…")
+        renderer.prepareLosslessEngine { [weak self] result in
+            guard let self, self.settingsStore.frameGenerationEngine == .lossless else { return }
+            switch result {
+            case .success:
+                self.controlPanel.setStatus("Engine: Lossless FG")
+            case .failure(let error):
+                self.controlPanel.setStatus("Lossless FG could not start: \(error.localizedDescription) MetalDuck's engine runs meanwhile.", isError: true)
+            }
+        }
     }
 
     func controlPanel(_ panel: ControlPanelView, didSelectProfile id: UUID) {

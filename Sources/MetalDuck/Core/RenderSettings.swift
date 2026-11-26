@@ -52,6 +52,14 @@ enum ArtifactGuard: String, Codable, Equatable, CaseIterable {
     }
 }
 
+/// Which shaders build the in-between frames.
+enum FrameGenerationEngineKind: String, Codable, Equatable, CaseIterable {
+    /// Vision optical flow and MetalDuck's own Metal shaders.
+    case metalDuck = "MetalDuck"
+    /// Lossless Scaling's LSFG shaders, read from the user's Lossless.dll.
+    case lossless = "Lossless FG"
+}
+
 struct RenderSettings: Codable, Equatable {
     var upscalingAlgorithm: UpscalingAlgorithm
     var outputScale: Float
@@ -65,6 +73,11 @@ struct RenderSettings: Codable, Equatable {
     var frameGenerationEnabled: Bool
     var frameGenerationMode: FrameGenerationMode
     var artifactGuard: ArtifactGuard
+    var frameGenerationEngine: FrameGenerationEngineKind
+    /// Lossless FG: LSFG 3.1's performance mode (half the feature channels: faster, a little softer).
+    var losslessPerformance: Bool
+    /// Lossless FG: resolution of the motion search relative to the capture, 0.25...1.0.
+    var losslessFlowScale: Float
 
     init(
         upscalingAlgorithm: UpscalingAlgorithm = .metalFXSpatial,
@@ -78,7 +91,10 @@ struct RenderSettings: Codable, Equatable {
         targetPresentationFPS: Int = 120,
         frameGenerationEnabled: Bool = true,
         frameGenerationMode: FrameGenerationMode = .x4,
-        artifactGuard: ArtifactGuard = .balanced
+        artifactGuard: ArtifactGuard = .balanced,
+        frameGenerationEngine: FrameGenerationEngineKind = .metalDuck,
+        losslessPerformance: Bool = false,
+        losslessFlowScale: Float = 1.0
     ) {
         self.upscalingAlgorithm = upscalingAlgorithm
         self.outputScale = outputScale
@@ -92,15 +108,20 @@ struct RenderSettings: Codable, Equatable {
         self.frameGenerationEnabled = frameGenerationEnabled
         self.frameGenerationMode = frameGenerationMode
         self.artifactGuard = artifactGuard
+        self.frameGenerationEngine = frameGenerationEngine
+        self.losslessPerformance = losslessPerformance
+        self.losslessFlowScale = losslessFlowScale
     }
 
     private enum CodingKeys: String, CodingKey {
         case upscalingAlgorithm, outputScale, matchOutputResolution, samplingMode, sharpness
         case dynamicResolutionEnabled, dynamicScaleMinimum, dynamicScaleMaximum
         case targetPresentationFPS, frameGenerationEnabled, frameGenerationMode, artifactGuard
+        case frameGenerationEngine, losslessPerformance, losslessFlowScale
     }
 
-    /// Profiles saved before the artifact guard existed load with it on (balanced).
+    /// Profiles saved before the artifact guard existed load with it on (balanced), and
+    /// profiles saved before the engine choice existed use MetalDuck's engine.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         upscalingAlgorithm = try container.decode(UpscalingAlgorithm.self, forKey: .upscalingAlgorithm)
@@ -115,6 +136,9 @@ struct RenderSettings: Codable, Equatable {
         frameGenerationEnabled = try container.decode(Bool.self, forKey: .frameGenerationEnabled)
         frameGenerationMode = try container.decode(FrameGenerationMode.self, forKey: .frameGenerationMode)
         artifactGuard = try container.decodeIfPresent(ArtifactGuard.self, forKey: .artifactGuard) ?? .balanced
+        frameGenerationEngine = try container.decodeIfPresent(FrameGenerationEngineKind.self, forKey: .frameGenerationEngine) ?? .metalDuck
+        losslessPerformance = try container.decodeIfPresent(Bool.self, forKey: .losslessPerformance) ?? false
+        losslessFlowScale = try container.decodeIfPresent(Float.self, forKey: .losslessFlowScale) ?? 1.0
     }
 }
 
@@ -179,7 +203,7 @@ struct ShortcutSettings: Codable, Equatable {
 
 final class SettingsStore {
     private let lock = NSLock()
-    private var settings = RenderSettings(
+    private var settings: RenderSettings = SettingsStore.withLosslessPreferences(RenderSettings(
         upscalingAlgorithm: .metalFXSpatial,
         outputScale: 1.0,
         matchOutputResolution: true,
@@ -191,7 +215,34 @@ final class SettingsStore {
         targetPresentationFPS: 120,
         frameGenerationEnabled: true,
         frameGenerationMode: .x4
-    )
+    ))
+
+    /// Engine choice, LSFG mode and flow scale belong to the Mac (whether Lossless.dll is set up),
+    /// not to a profile, and profile edits are not saved; so they are kept app-wide.
+    private struct LosslessPreferences: Codable, Equatable {
+        var engine: FrameGenerationEngineKind
+        var performance: Bool
+        var flowScale: Float
+    }
+    private static let losslessPreferencesKey = "com.metalduck.losslessPreferences"
+
+    private static func withLosslessPreferences(_ settings: RenderSettings) -> RenderSettings {
+        guard let data = UserDefaults.standard.data(forKey: losslessPreferencesKey),
+              let saved = try? JSONDecoder().decode(LosslessPreferences.self, from: data) else { return settings }
+        var settings = settings
+        settings.frameGenerationEngine = saved.engine
+        settings.losslessPerformance = saved.performance
+        settings.losslessFlowScale = saved.flowScale
+        return settings
+    }
+
+    private static func preferences(of settings: RenderSettings) -> LosslessPreferences {
+        LosslessPreferences(
+            engine: settings.frameGenerationEngine,
+            performance: settings.losslessPerformance,
+            flowScale: settings.losslessFlowScale
+        )
+    }
 
     private var shortcutSettings: ShortcutSettings = {
         if let data = UserDefaults.standard.data(forKey: "com.metalduck.shortcut"),
@@ -211,7 +262,12 @@ final class SettingsStore {
     func update(action: (inout RenderSettings) -> Void) -> RenderSettings {
         lock.lock()
         defer { lock.unlock() }
+        let before = Self.preferences(of: settings)
         action(&settings)
+        let after = Self.preferences(of: settings)
+        if after != before, let data = try? JSONEncoder().encode(after) {
+            UserDefaults.standard.set(data, forKey: Self.losslessPreferencesKey)
+        }
         return settings
     }
     
@@ -263,6 +319,18 @@ final class SettingsStore {
     var artifactGuard: ArtifactGuard {
         get { snapshot().artifactGuard }
         set { update { $0.artifactGuard = newValue } }
+    }
+    var frameGenerationEngine: FrameGenerationEngineKind {
+        get { snapshot().frameGenerationEngine }
+        set { update { $0.frameGenerationEngine = newValue } }
+    }
+    var losslessPerformance: Bool {
+        get { snapshot().losslessPerformance }
+        set { update { $0.losslessPerformance = newValue } }
+    }
+    var losslessFlowScale: Float {
+        get { snapshot().losslessFlowScale }
+        set { update { $0.losslessFlowScale = newValue } }
     }
 
     var shortcut: ShortcutSettings {

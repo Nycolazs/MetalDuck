@@ -46,6 +46,9 @@ final class RendererCoordinator: NSObject {
 
     private let upscaler: MetalFXSpatialUpscaler
     private let frameGenerationEngine: MetalFXFrameGenerationEngine
+    /// Built on first use from the user's Lossless.dll; guarded by renderLock.
+    private var losslessEngine: LosslessFrameGenerationEngine?
+    private var losslessEngineLoading = false
 
     private weak var view: MTKView?
 
@@ -177,6 +180,7 @@ final class RendererCoordinator: NSObject {
             firstFrameShown = false
             resetFrameState()
             frameGenerationEngine.reset()
+            losslessEngine?.reset()
             lastPresentHostTime = nil
             smoothedPresentFrameTime = 1.0 / 60.0
             dynamicScaleFactor = 1.0
@@ -203,6 +207,7 @@ final class RendererCoordinator: NSObject {
         renderLock.withLock {
             resetFrameState()
             frameGenerationEngine.reset()
+            losslessEngine?.reset()
         }
         pauseDrawing()
     }
@@ -709,7 +714,9 @@ fragment float4 fragmentPresent(
         )
         if frame.startsNewShot {
             PipelineLog.shared.noteTiming("cuts between shots", milliseconds: 0)
-        } else if let flowFrame, let previousFlowFrame = bufferedFrames.last?.flowFrame {
+        } else if let flowFrame, let previousFlowFrame = bufferedFrames.last?.flowFrame,
+                  !(losslessEngine != nil && settingsStore.snapshot().frameGenerationEngine == .lossless) {
+            // Lossless FG finds its own motion, so Vision's flow is only needed for MetalDuck's engine.
             frameGenerationEngine.requestFlow(previous: previousFlowFrame, next: flowFrame, after: commandBuffer)
         }
 
@@ -975,14 +982,30 @@ fragment float4 fragmentPresent(
         }
         lastShownFrameID = nil
 
-        switch frameGenerationEngine.attemptInterpolation(
-            commandBuffer: commandBuffer,
-            previous: GenerationFrame(texture: olderTexture, id: older.id),
-            next: GenerationFrame(texture: newerTexture, id: newer.id),
-            t: t,
-            shotStartID: shotStart(atOrBefore: older.id),
-            artifactGuard: settings.artifactGuard
-        ) {
+        let previousFrame = GenerationFrame(texture: olderTexture, id: older.id)
+        let nextFrame = GenerationFrame(texture: newerTexture, id: newer.id)
+        let attempt: FrameInterpolationAttempt
+        if settings.frameGenerationEngine == .lossless, let losslessEngine {
+            attempt = losslessEngine.attemptInterpolation(
+                commandBuffer: commandBuffer,
+                previous: previousFrame,
+                next: nextFrame,
+                t: t,
+                multiplier: settings.frameGenerationMode.multiplier,
+                performance: settings.losslessPerformance,
+                flowScale: settings.losslessFlowScale
+            )
+        } else {
+            attempt = frameGenerationEngine.attemptInterpolation(
+                commandBuffer: commandBuffer,
+                previous: previousFrame,
+                next: nextFrame,
+                t: t,
+                shotStartID: shotStart(atOrBefore: older.id),
+                artifactGuard: settings.artifactGuard
+            )
+        }
+        switch attempt {
         case .produced(let interpolated, let flowWidth, let flowHeight, let flowFrameID, let latestCaptureID):
             noteDifficulty(olderID: older.id, newerID: newer.id, artifactGuard: settings.artifactGuard)
             PipelineLog.shared.notePresent(.flow(
@@ -1105,6 +1128,47 @@ fragment float4 fragmentPresent(
         }
 
         statsLock.unlock()
+    }
+}
+
+extension RendererCoordinator {
+    /// Builds the Lossless FG engine from the imported Lossless.dll, off the main thread.
+    /// Until it is ready (or if it fails) frame generation keeps using MetalDuck's engine.
+    @MainActor
+    func prepareLosslessEngine(completion: @escaping @MainActor (Result<Void, Error>) -> Void) {
+        let ready = renderLock.withLock { () -> Bool? in
+            if losslessEngine != nil { return true }
+            if losslessEngineLoading { return nil }
+            losslessEngineLoading = true
+            return false
+        }
+        switch ready {
+        case true?:
+            completion(.success(()))
+            return
+        case nil:
+            return
+        case false?:
+            break
+        }
+
+        let device = context.device
+        let dllURL = LosslessScalingLibrary.installedURL
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result<LosslessFrameGenerationEngine, Error> {
+                    try LosslessFrameGenerationEngine(device: device, dllURL: dllURL)
+                }
+            }.value
+            if case .failure(let error) = result {
+                PipelineLog.shared.event("lossless", "engine unavailable: \(error.localizedDescription)")
+            }
+            renderLock.withLock {
+                losslessEngineLoading = false
+                if case .success(let engine) = result { losslessEngine = engine }
+            }
+            completion(result.map { _ in () })
+        }
     }
 }
 
