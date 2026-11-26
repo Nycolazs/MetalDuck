@@ -96,7 +96,18 @@ final class MainViewController: NSViewController {
         updateWindowTitle()
     }
 
+    /// True while capture and scaling run.
+    var isScaling: Bool { renderer.isRunning }
+
     func start() async {
+        // Check Screen Recording now and whenever MetalDuck comes back to the front
+        // (for example after turning it on in System Settings).
+        refreshScreenRecordingPermission()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshScreenRecordingPermission() }
+        }
         await refreshCaptureSources()
         controlPanel.setCaptureMode(selectedCaptureMode)
         applyCaptureTargetSelection()
@@ -418,6 +429,17 @@ final class MainViewController: NSViewController {
         updateWindowTitle()
     }
 
+    private var screenRecordingMissing = false
+
+    private func refreshScreenRecordingPermission() {
+        let granted = CGPreflightScreenCaptureAccess()
+        controlPanel.setScreenRecordingNeeded(!granted)
+        if granted, screenRecordingMissing {
+            controlPanel.setStatus("Screen Recording is on. Ready.")
+        }
+        screenRecordingMissing = !granted
+    }
+
     private func ensureScreenCapturePermission() -> Bool {
         if CGPreflightScreenCaptureAccess() {
             return true
@@ -615,6 +637,8 @@ extension MainViewController: ControlPanelViewDelegate {
         guard ensureScreenCapturePermission() else {
             PipelineLog.shared.event("session", "start refused: Screen Recording permission denied")
             panel.setStatus("Screen Recording permission denied.", isError: true)
+            panel.setScreenRecordingNeeded(true)
+            screenRecordingMissing = true
             overlayController.setCaptureError("Screen Recording permission denied")
             return
         }

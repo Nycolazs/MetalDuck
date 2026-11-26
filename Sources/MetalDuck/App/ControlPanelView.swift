@@ -99,6 +99,8 @@ final class ControlPanelView: NSView {
 
     // Session
     private let statusMessageLabel = GlassLabel.make("Ready", font: GlassFont.caption, color: .tertiaryLabelColor)
+    /// Shown while MetalDuck has no Screen Recording permission.
+    private lazy var screenRecordingRow = makeScreenRecordingRow()
     private let captureMetric = MetricTile(caption: "Capture", symbol: "camera.viewfinder", unit: "fps")
     private let outputMetric = MetricTile(caption: "Output", symbol: "display", unit: "fps")
     private let generatedMetric = MetricTile(caption: "Generated", symbol: "sparkles", unit: "fps")
@@ -359,6 +361,48 @@ final class ControlPanelView: NSView {
         if !running {
             resetMetrics()
         }
+    }
+
+    /// Shows or hides the Screen Recording row (Open Settings…, Relaunch).
+    func setScreenRecordingNeeded(_ needed: Bool) {
+        screenRecordingRow.isHidden = !needed
+    }
+
+    private func makeScreenRecordingRow() -> NSStackView {
+        let label = GlassLabel.make(
+            "MetalDuck needs Screen Recording. Turned it on already? Relaunch to use it.",
+            font: GlassFont.caption,
+            color: .secondaryLabelColor
+        )
+        func button(_ title: String, _ action: Selector, _ tip: String) -> NSButton {
+            let button = HandCursorButton(title: title, target: self, action: action)
+            button.bezelStyle = .push
+            button.controlSize = .small
+            button.toolTip = tip
+            return button
+        }
+        let row = NSStackView(views: [
+            label,
+            button("Open Settings…", #selector(handleOpenScreenRecordingSettings),
+                   "Opens Privacy & Security › Screen Recording. Turn MetalDuck on there."),
+            button("Relaunch", #selector(handleRelaunch),
+                   "macOS applies a new Screen Recording permission after MetalDuck restarts."),
+        ])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.isHidden = true
+        return row
+    }
+
+    @objc private func handleOpenScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func handleRelaunch() {
+        AppDelegate.relaunch()
     }
 
     func setStatus(_ message: String, isError: Bool = false) {
@@ -864,7 +908,7 @@ final class ControlPanelView: NSView {
 
         statusMessageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let stack = NSStackView(views: [metrics, statusMessageLabel])
+        let stack = NSStackView(views: [metrics, statusMessageLabel, screenRecordingRow])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
         stack.alignment = .leading

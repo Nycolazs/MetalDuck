@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var didBootstrap = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApplication.shared.mainMenu = MainMenu.make()
         LosslessScalingLibrary.importFromSteamIfNeeded()
         bootstrapIfNeeded()
     }
@@ -80,7 +81,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             Task { await viewController.start() }
             requestScreenCapturePermissionIfNeededAsync()
-            requestAccessibilityPermissionIfNeededAsync()
         } catch {
             print("CRITICAL: Bootstrap failed: \(error)")
             presentFatalInitializationError(error)
@@ -88,7 +88,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let mainViewController else {
+        // Nothing to stop: quit at once.
+        guard let mainViewController, mainViewController.isScaling else {
             return .terminateNow
         }
 
@@ -128,10 +129,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = CGRequestScreenCaptureAccess()
     }
 
-    private func requestAccessibilityPermissionIfNeededAsync() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
+    /// Starts a new copy of MetalDuck and quits this one. macOS applies a Screen Recording
+    /// permission granted while the app runs only after it restarts.
+    static func relaunch() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, _ in
+            // Quit from the run loop, not from a main-queue block: terminating waits for the stop
+            // task, which runs on the main queue and could never start inside a main-queue block.
+            DispatchQueue.main.async {
+                NSApplication.shared.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
+            }
         }
     }
 }
