@@ -451,7 +451,7 @@ final class RendererCoordinator: NSObject {
         return (pipelineState, linearSampler, nearestSampler, library)
     }
 
-    private static func loadPresentShaderSource() throws -> String {
+    static func loadPresentShaderSource() throws -> String {
         let resourceLocations: [(name: String, subdirectory: String?)] = [
             ("Present", "Rendering/Shaders"),
             ("Present", "Shaders"),

@@ -18,7 +18,7 @@ SDKROOT="$SDKROOT_PATH" swift build -c release
 
 BIN_DIR="$ROOT_DIR/.build/release"
 PRODUCT_BIN="$BIN_DIR/MetalDuck"
-BUNDLE_DIR="$BIN_DIR/MetalDuck_MetalDuck.bundle"
+BUNDLE_DIR="$BIN_DIR/MetalDuck_MetalDuckKit.bundle"
 ICON_FILE="$ROOT_DIR/Sources/MetalDuck/Assets/AppIcon.icns"
 
 if [[ ! -f "$PRODUCT_BIN" ]]; then

@@ -6,13 +6,13 @@ import Foundation
 /// SPM resource bundle cannot be found at runtime (e.g. when the app is
 /// launched outside the build directory or the bundle layout differs).
 /// This extension tries the same lookup paths but returns `nil` instead of
-/// crashing, allowing callers to fall back gracefully.
+/// crashing, so the caller can report what is missing.
 extension Bundle {
     /// The SPM resource bundle, or `nil` when the bundle is unavailable.
     static let safeModule: Bundle? = {
-        let bundleName = "MetalDuck_MetalDuck"
+        let bundleName = "MetalDuck_MetalDuckKit.bundle"
 
-        let candidates = [
+        var candidates: [URL?] = [
             // When running from a built .app bundle.
             Bundle.main.resourceURL,
             // Next to the executable (SPM build tree).
@@ -20,10 +20,15 @@ extension Bundle {
             // Common SPM paths relative to the executable.
             Bundle.main.bundleURL.appendingPathComponent("Contents/Resources"),
         ]
+        // Under `swift test` the main bundle is the test runner, and the resources sit
+        // inside or beside the test bundle instead.
+        for bundle in Bundle.allBundles + [Bundle(for: BundleToken.self)] {
+            candidates.append(bundle.resourceURL)
+            candidates.append(bundle.bundleURL.deletingLastPathComponent())
+        }
 
-        for candidate in candidates {
-            let bundlePath = candidate?.appendingPathComponent(bundleName + ".bundle")
-            if let bundlePath, let bundle = Bundle(url: bundlePath) {
+        for case let candidate? in candidates {
+            if let bundle = Bundle(url: candidate.appendingPathComponent(bundleName)) {
                 return bundle
             }
         }
@@ -31,3 +36,6 @@ extension Bundle {
         return nil
     }()
 }
+
+/// Lives in this module's binary, so `Bundle(for:)` finds whatever that binary is part of.
+private final class BundleToken {}

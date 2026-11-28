@@ -1,11 +1,12 @@
 import AppKit
 
+/// The app's entry point. The executable target only calls `run()`, so everything else
+/// lives in the library and can be tested.
 @MainActor
-@main
-enum MetalDuckApp {
+public enum MetalDuckApplication {
     private static let appDelegate = AppDelegate()
 
-    static func main() {
+    public static func run() {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         app.delegate = appDelegate
