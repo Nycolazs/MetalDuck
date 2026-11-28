@@ -61,11 +61,20 @@ enum ArtifactGuard: String, Codable, Equatable, CaseIterable {
 
 struct RenderSettings: Codable, Equatable {
     var upscalingAlgorithm: UpscalingAlgorithm
-    var outputScale: Float
-    var matchOutputResolution: Bool
+    /// Off (Automatic): capture keeps to a pixel budget and the picture is scaled to the
+    /// overlay. On (Manual): `inputResolution` and `outputResolution` are used.
+    var manualResolution: Bool
+    /// Manual only. The capture is the largest size of the source's shape that fits inside it.
+    var inputResolution: PixelSize
+    /// Manual only. The size the scaler renders to, held to the overlay's own size.
+    var outputResolution: PixelSize
+    /// Manual only. Automatic always fills.
+    var aspectMode: AspectMode
     var samplingMode: SamplingMode
     var sharpness: Float
+    /// Automatic only: lower the capture size while the GPU is short of time.
     var dynamicResolutionEnabled: Bool
+    /// The smallest and largest share of the usual capture size, per side.
     var dynamicScaleMinimum: Float
     var dynamicScaleMaximum: Float
     var targetPresentationFPS: Int
@@ -75,8 +84,10 @@ struct RenderSettings: Codable, Equatable {
 
     init(
         upscalingAlgorithm: UpscalingAlgorithm = .metalFXSpatial,
-        outputScale: Float = 1.0,
-        matchOutputResolution: Bool = true,
+        manualResolution: Bool = false,
+        inputResolution: PixelSize = PixelSize(width: 1280, height: 720),
+        outputResolution: PixelSize = PixelSize(width: 2560, height: 1440),
+        aspectMode: AspectMode = .fit,
         samplingMode: SamplingMode = .linear,
         sharpness: Float = 0.75,
         dynamicResolutionEnabled: Bool = false,
@@ -88,8 +99,10 @@ struct RenderSettings: Codable, Equatable {
         artifactGuard: ArtifactGuard = .balanced
     ) {
         self.upscalingAlgorithm = upscalingAlgorithm
-        self.outputScale = outputScale
-        self.matchOutputResolution = matchOutputResolution
+        self.manualResolution = manualResolution
+        self.inputResolution = inputResolution
+        self.outputResolution = outputResolution
+        self.aspectMode = aspectMode
         self.samplingMode = samplingMode
         self.sharpness = sharpness
         self.dynamicResolutionEnabled = dynamicResolutionEnabled
@@ -101,23 +114,39 @@ struct RenderSettings: Codable, Equatable {
         self.artifactGuard = artifactGuard
     }
 
+    /// The capture size these settings ask for: nil in Automatic.
+    var requestedInput: PixelSize? { manualResolution ? inputResolution : nil }
+    /// The render size these settings ask for: nil in Automatic.
+    var requestedOutput: PixelSize? { manualResolution ? outputResolution : nil }
+    /// Automatic fills the overlay, as it always has.
+    var effectiveAspectMode: AspectMode { manualResolution ? aspectMode : .fill }
+    /// Dynamic resolution only acts in Automatic: Manual sizes are the user's to keep.
+    var dynamicResolutionActive: Bool { dynamicResolutionEnabled && !manualResolution }
+
     private enum CodingKeys: String, CodingKey {
-        case upscalingAlgorithm, outputScale, matchOutputResolution, samplingMode, sharpness
+        case upscalingAlgorithm, manualResolution, inputResolution, outputResolution, aspectMode
+        case samplingMode, sharpness
         case dynamicResolutionEnabled, dynamicScaleMinimum, dynamicScaleMaximum
         case targetPresentationFPS, frameGenerationEnabled, frameGenerationMode, artifactGuard
     }
 
-    /// Profiles saved before the artifact guard existed load with it on (balanced).
+    /// Profiles saved by older versions lack the newer keys and load with the defaults:
+    /// the artifact guard on (balanced) and Automatic resolution. Their `outputScale` and
+    /// `matchOutputResolution` are ignored; with "Fit to output" on, the factor did nothing.
     init(from decoder: Decoder) throws {
+        let defaults = RenderSettings()
         let container = try decoder.container(keyedBy: CodingKeys.self)
         upscalingAlgorithm = try container.decode(UpscalingAlgorithm.self, forKey: .upscalingAlgorithm)
-        outputScale = try container.decode(Float.self, forKey: .outputScale)
-        matchOutputResolution = try container.decode(Bool.self, forKey: .matchOutputResolution)
+        manualResolution = try container.decodeIfPresent(Bool.self, forKey: .manualResolution) ?? defaults.manualResolution
+        inputResolution = try container.decodeIfPresent(PixelSize.self, forKey: .inputResolution) ?? defaults.inputResolution
+        outputResolution = try container.decodeIfPresent(PixelSize.self, forKey: .outputResolution) ?? defaults.outputResolution
+        aspectMode = try container.decodeIfPresent(AspectMode.self, forKey: .aspectMode) ?? defaults.aspectMode
         samplingMode = try container.decode(SamplingMode.self, forKey: .samplingMode)
         sharpness = try container.decode(Float.self, forKey: .sharpness)
         dynamicResolutionEnabled = try container.decode(Bool.self, forKey: .dynamicResolutionEnabled)
         dynamicScaleMinimum = try container.decode(Float.self, forKey: .dynamicScaleMinimum)
-        dynamicScaleMaximum = try container.decode(Float.self, forKey: .dynamicScaleMaximum)
+        // The maximum used to go up to 1.25; capture cannot exceed its usual size.
+        dynamicScaleMaximum = min(try container.decode(Float.self, forKey: .dynamicScaleMaximum), 1)
         targetPresentationFPS = try container.decode(Int.self, forKey: .targetPresentationFPS)
         frameGenerationEnabled = try container.decode(Bool.self, forKey: .frameGenerationEnabled)
         frameGenerationMode = try container.decode(FrameGenerationMode.self, forKey: .frameGenerationMode)
@@ -186,19 +215,7 @@ struct ShortcutSettings: Codable, Equatable {
 
 final class SettingsStore {
     private let lock = NSLock()
-    private var settings = RenderSettings(
-        upscalingAlgorithm: .metalFXSpatial,
-        outputScale: 1.0,
-        matchOutputResolution: true,
-        samplingMode: .linear,
-        sharpness: 0.75,
-        dynamicResolutionEnabled: false,
-        dynamicScaleMinimum: 0.75,
-        dynamicScaleMaximum: 1.0,
-        targetPresentationFPS: 120,
-        frameGenerationEnabled: true,
-        frameGenerationMode: .x4
-    )
+    private var settings = RenderSettings()
 
     private var shortcutSettings: ShortcutSettings = {
         if let data = UserDefaults.standard.data(forKey: "com.metalduck.shortcut"),
@@ -215,6 +232,7 @@ final class SettingsStore {
         return settings
     }
 
+    @discardableResult
     func update(action: (inout RenderSettings) -> Void) -> RenderSettings {
         lock.lock()
         defer { lock.unlock() }
@@ -222,54 +240,11 @@ final class SettingsStore {
         return settings
     }
     
-    // Conformance/Utility methods to avoid too many changes in MainVC
-    var upscalingAlgorithm: UpscalingAlgorithm {
-        get { snapshot().upscalingAlgorithm }
-        set { update { $0.upscalingAlgorithm = newValue } }
-    }
-    var outputScale: Float {
-        get { snapshot().outputScale }
-        set { update { $0.outputScale = newValue } }
-    }
-    var matchOutputResolution: Bool {
-        get { snapshot().matchOutputResolution }
-        set { update { $0.matchOutputResolution = newValue } }
-    }
-    var samplingMode: SamplingMode {
-        get { snapshot().samplingMode }
-        set { update { $0.samplingMode = newValue } }
-    }
-    var sharpness: Float {
-        get { snapshot().sharpness }
-        set { update { $0.sharpness = newValue } }
-    }
-    var dynamicResolutionEnabled: Bool {
-        get { snapshot().dynamicResolutionEnabled }
-        set { update { $0.dynamicResolutionEnabled = newValue } }
-    }
-    var dynamicScaleMinimum: Float {
-        get { snapshot().dynamicScaleMinimum }
-        set { update { $0.dynamicScaleMinimum = newValue } }
-    }
-    var dynamicScaleMaximum: Float {
-        get { snapshot().dynamicScaleMaximum }
-        set { update { $0.dynamicScaleMaximum = newValue } }
-    }
-    var targetPresentationFPS: Int {
-        get { snapshot().targetPresentationFPS }
-        set { update { $0.targetPresentationFPS = newValue } }
-    }
-    var frameGenerationEnabled: Bool {
-        get { snapshot().frameGenerationEnabled }
-        set { update { $0.frameGenerationEnabled = newValue } }
-    }
-    var frameGenerationMode: FrameGenerationMode {
-        get { snapshot().frameGenerationMode }
-        set { update { $0.frameGenerationMode = newValue } }
-    }
-    var artifactGuard: ArtifactGuard {
-        get { snapshot().artifactGuard }
-        set { update { $0.artifactGuard = newValue } }
+    /// Swaps in a whole set of settings, as when a profile is picked.
+    func replace(with newSettings: RenderSettings) {
+        lock.lock()
+        settings = newSettings
+        lock.unlock()
     }
 
     var shortcut: ShortcutSettings {

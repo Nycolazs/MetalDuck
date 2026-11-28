@@ -10,4 +10,6 @@ protocol FrameCaptureService: AnyObject, Sendable {
     func stop() async
     func reconfigure(target: CaptureTarget) async throws
     func reconfigure(configuration: CaptureConfiguration) async throws
+    /// Dynamic resolution: capture each side at this share (0.1 to 1) of its usual size.
+    func setDynamicInputScale(_ scale: Double)
 }

@@ -44,6 +44,11 @@ fragment float4 fragmentPresent(
     sampler sourceSampler [[sampler(0)]],
     constant PresentUniforms &uniforms [[buffer(0)]]
 ) {
+    // Past the picture's edge: the bars of a picture fitted into a differently shaped
+    // output. Without this the edge pixels would smear across them.
+    if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
     float2 uv = saturate(in.uv);
 
     float blendFactor = saturate(uniforms.blendFactor);

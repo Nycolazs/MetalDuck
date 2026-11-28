@@ -130,9 +130,11 @@ final class RendererCoordinator: NSObject {
     private var library: MTLLibrary
 
     private var running = false
-    private var smoothedPresentFrameTime: Double = 1.0 / 60.0
-    private var lastPresentHostTime: CFTimeInterval?
-    private var dynamicScaleFactor: Float = 1.0
+    /// Dynamic resolution: the share of its usual size each side is captured at, when it
+    /// last moved, and a running average of the GPU time one drawn frame takes.
+    private var dynamicInputScale: Double = 1.0
+    private var lastDynamicStepTime: CFTimeInterval = 0
+    private var smoothedGPUFrameTime: Double = 0
     private var loggedMetalFXFailure = false
 
     @MainActor
@@ -193,10 +195,11 @@ final class RendererCoordinator: NSObject {
             firstFrameShown = false
             resetFrameState()
             frameGenerationEngine.reset()
-            lastPresentHostTime = nil
-            smoothedPresentFrameTime = 1.0 / 60.0
-            dynamicScaleFactor = 1.0
+            dynamicInputScale = 1.0
+            lastDynamicStepTime = CACurrentMediaTime()
         }
+        statsLock.withLock { smoothedGPUFrameTime = 0 }
+        captureService.setDynamicInputScale(1.0)
         let settings = settingsStore.snapshot()
         PipelineLog.shared.logSessionRunning(
             settings: settings,
@@ -714,70 +717,42 @@ final class RendererCoordinator: NSObject {
         return texture
     }
 
-    private func presentationScale(
-        sourceTexture: MTLTexture,
-        drawableSize: CGSize
-    ) -> SIMD2<Float> {
-        let sourceAspect = Float(sourceTexture.width) / Float(max(1, sourceTexture.height))
-        let drawableAspect = Float(drawableSize.width) / Float(max(1, drawableSize.height))
-
-        // Fill output to avoid visible black bars; this crops the longer axis.
-        if sourceAspect > drawableAspect {
-            return SIMD2<Float>(sourceAspect / drawableAspect, 1.0)
+    /// Dynamic resolution. Frame generation works at capture size, so that is what gives
+    /// GPU time back: when a drawn frame takes most of its slot, capture each side 10%
+    /// smaller; when it takes under half, 10% larger. One step a second at most, because
+    /// each step resizes the stream and empties the frame ring.
+    private func updateDynamicResolution(settings: RenderSettings, targetFPS: Int) {
+        guard settings.dynamicResolutionActive else {
+            if dynamicInputScale != 1.0 {
+                dynamicInputScale = 1.0
+                captureService.setDynamicInputScale(1.0)
+            }
+            return
         }
-
-        return SIMD2<Float>(1.0, drawableAspect / sourceAspect)
-    }
-
-    private func updatePresentFrameTime() {
         let now = CACurrentMediaTime()
-        if let lastPresentHostTime {
-            let delta = max(1.0 / 240.0, now - lastPresentHostTime)
-            smoothedPresentFrameTime = (smoothedPresentFrameTime * 0.9) + (delta * 0.1)
+        guard now - lastDynamicStepTime >= 1.0 else { return }
+        lastDynamicStepTime = now
+
+        let gpuTime = statsLock.withLock { smoothedGPUFrameTime }
+        guard gpuTime > 0 else { return }
+        let slot = 1.0 / Double(max(targetFPS, 1))
+        let low = Double(min(settings.dynamicScaleMinimum, settings.dynamicScaleMaximum))
+        let high = Double(max(settings.dynamicScaleMinimum, settings.dynamicScaleMaximum))
+
+        var scale = dynamicInputScale
+        if gpuTime > slot * 0.8 {
+            scale -= 0.1
+        } else if gpuTime < slot * 0.45 {
+            scale += 0.1
         }
-        lastPresentHostTime = now
-    }
-
-    private func effectiveScale(
-        for settings: RenderSettings,
-        inputTexture: MTLTexture,
-        drawableSize: CGSize
-    ) -> Float {
-        let manualScale = max(0.5, min(settings.outputScale, 3.0))
-        let baseScale: Float
-
-        if settings.matchOutputResolution {
-            let drawableWidth = max(1.0, Float(drawableSize.width))
-            let drawableHeight = max(1.0, Float(drawableSize.height))
-            let scaleX = drawableWidth / Float(max(1, inputTexture.width))
-            let scaleY = drawableHeight / Float(max(1, inputTexture.height))
-            // In match mode, keep fit-to-window as the base and allow manualScale
-            // as a multiplicative bias so user changes always have visible effect.
-            let fitScale = max(0.5, min(min(scaleX, scaleY), 3.0))
-            // The factor can lower the output below the fit (cheaper), but never above it:
-            // pixels past the drawable are rendered, then thrown away when drawn. On a
-            // full-screen 4× session that was about a third of the GPU's work per frame.
-            baseScale = max(0.5, min(fitScale * manualScale, fitScale))
-        } else {
-            baseScale = manualScale
-        }
-
-        guard settings.dynamicResolutionEnabled else {
-            dynamicScaleFactor = 1.0
-            return baseScale
-        }
-
-        let targetFPS = Double(max(settings.targetPresentationFPS, 30))
-        let targetFrameTime = 1.0 / targetFPS
-
-        if smoothedPresentFrameTime > (targetFrameTime * 1.06) {
-            dynamicScaleFactor -= 0.02
-        } else if smoothedPresentFrameTime < (targetFrameTime * 0.92) {
-            dynamicScaleFactor += 0.01
-        }
-
-        dynamicScaleFactor = max(settings.dynamicScaleMinimum, min(dynamicScaleFactor, settings.dynamicScaleMaximum))
-        return baseScale * dynamicScaleFactor
+        scale = min(max(scale, low), min(high, 1.0))
+        guard abs(scale - dynamicInputScale) > 0.001 else { return }
+        dynamicInputScale = scale
+        PipelineLog.shared.event("upscale", String(
+            format: "dynamic resolution: GPU %.1f ms of a %.1f ms slot, capture now at %d%% per side",
+            gpuTime * 1000, slot * 1000, Int((scale * 100).rounded())
+        ))
+        captureService.setDynamicInputScale(scale)
     }
 
     private func preferredPresentationFPS(for settings: RenderSettings) -> Int {
@@ -799,64 +774,59 @@ final class RendererCoordinator: NSObject {
         return min(userTarget, fgCeiling)
     }
 
+    /// Scales `inputTexture` to `target`. MetalFX only scales up, so a smaller target, or
+    /// one that is smaller on one side, takes the plain resample.
     private func upscaleIfNeeded(
         commandBuffer: MTLCommandBuffer,
         inputTexture: MTLTexture,
         scratchBuffer: inout MTLTexture?,
         settings: RenderSettings,
-        scale: Float
-    ) -> (texture: MTLTexture, fellBack: Bool) {
-        let outputWidth = max(1, Int(Float(inputTexture.width) * scale))
-        let outputHeight = max(1, Int(Float(inputTexture.height) * scale))
-
-        if outputWidth == inputTexture.width, outputHeight == inputTexture.height {
-            return (inputTexture, false)
+        target: PixelSize
+    ) -> (texture: MTLTexture, algorithm: String, fellBack: Bool) {
+        let input = PixelSize(width: inputTexture.width, height: inputTexture.height)
+        if target == input {
+            return (inputTexture, "identity", false)
+        }
+        guard let outputTexture = ensureReusableTexture(
+            texture: &scratchBuffer,
+            width: target.width,
+            height: target.height,
+            pixelFormat: inputTexture.pixelFormat
+        ) else {
+            return (inputTexture, "identity", true)
         }
 
-        switch settings.upscalingAlgorithm {
-        case .nativeLinear:
-            guard let outputTexture = ensureReusableTexture(
-                texture: &scratchBuffer,
-                width: outputWidth,
-                height: outputHeight,
-                pixelFormat: inputTexture.pixelFormat
-            ) else {
-                return (inputTexture, false)
-            }
-
-            encodeNativeResample(
-                commandBuffer: commandBuffer,
-                sourceTexture: inputTexture,
-                destinationTexture: outputTexture,
-                samplingMode: settings.samplingMode
-            )
-            return (outputTexture, false)
-
-        case .metalFXSpatial:
-            guard let outputTexture = ensureReusableTexture(
-                texture: &scratchBuffer,
-                width: outputWidth,
-                height: outputHeight,
-                pixelFormat: inputTexture.pixelFormat
-            ) else {
-                return (inputTexture, true)
-            }
-
+        if settings.upscalingAlgorithm == .metalFXSpatial, ScalePlan.canUpscale(from: input, to: target) {
             do {
                 try upscaler.encode(
                     commandBuffer: commandBuffer,
                     inputTexture: inputTexture,
                     outputTexture: outputTexture
                 )
-                return (outputTexture, false)
+                return (outputTexture, UpscalingAlgorithm.metalFXSpatial.rawValue, false)
             } catch {
                 if !loggedMetalFXFailure {
                     loggedMetalFXFailure = true
-                    PipelineLog.shared.event("upscale", "MetalFX failed: \(error.localizedDescription)")
+                    PipelineLog.shared.event("upscale", "MetalFX failed, using the plain resample: \(error.localizedDescription)")
                 }
-                return (inputTexture, true)
+                encodeNativeResample(
+                    commandBuffer: commandBuffer,
+                    sourceTexture: inputTexture,
+                    destinationTexture: outputTexture,
+                    samplingMode: .linear
+                )
+                return (outputTexture, UpscalingAlgorithm.nativeLinear.rawValue, true)
             }
         }
+
+        encodeNativeResample(
+            commandBuffer: commandBuffer,
+            sourceTexture: inputTexture,
+            destinationTexture: outputTexture,
+            // Shrinking with nearest sampling drops rows and columns outright.
+            samplingMode: settings.upscalingAlgorithm == .nativeLinear ? settings.samplingMode : .linear
+        )
+        return (outputTexture, UpscalingAlgorithm.nativeLinear.rawValue, false)
     }
 
     private func resolvePresentationTextures(
@@ -1086,12 +1056,17 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
         let drawableSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         targetPresentTime = targetTime
         if running {
-            commandBuffer.addCompletedHandler { buffer in
-                PipelineLog.shared.noteGPUTime(milliseconds: (buffer.gpuEndTime - buffer.gpuStartTime) * 1000)
+            commandBuffer.addCompletedHandler { [weak self] buffer in
+                let gpuTime = buffer.gpuEndTime - buffer.gpuStartTime
+                PipelineLog.shared.noteGPUTime(milliseconds: gpuTime * 1000)
+                guard let self, gpuTime > 0 else { return }
+                self.statsLock.withLock {
+                    self.smoothedGPUFrameTime = self.smoothedGPUFrameTime == 0
+                        ? gpuTime
+                        : self.smoothedGPUFrameTime * 0.9 + gpuTime * 0.1
+                }
             }
         }
-
-        updatePresentFrameTime()
 
         guard running else {
             if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) {
@@ -1109,6 +1084,7 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
             linkFrameRate = targetFPS
             Self.apply(frameRate: targetFPS, to: link)
         }
+        updateDynamicResolution(settings: settings, targetFPS: targetFPS)
 
         guard let presentation = resolvePresentationTextures(
             commandBuffer: commandBuffer,
@@ -1130,20 +1106,24 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
             Task { @MainActor in callback?() }
         }
 
-        // Now upscale the presentation textures (either the real frame or the generated frame)
-        let scale = effectiveScale(
-            for: settings,
-            inputTexture: presentation.primary,
-            drawableSize: drawableSize
+        // Scale the picture that will be shown (a real frame or a generated one).
+        let drawablePixels = PixelSize(width: drawable.texture.width, height: drawable.texture.height)
+        let inputPixels = PixelSize(width: presentation.primary.width, height: presentation.primary.height)
+        let aspectMode = settings.effectiveAspectMode
+        let target = ScalePlan.renderSize(
+            input: inputPixels,
+            requested: settings.requestedOutput,
+            drawable: drawablePixels,
+            aspect: aspectMode
         )
-        lastEffectiveScale = scale
-        
+        lastEffectiveScale = Float(target.width) / Float(max(inputPixels.width, 1))
+
         let primaryUpscale = upscaleIfNeeded(
             commandBuffer: commandBuffer,
             inputTexture: presentation.primary,
             scratchBuffer: &upscaledScratchTexture,
             settings: settings,
-            scale: scale
+            target: target
         )
         let finalPrimary = primaryUpscale.texture
 
@@ -1158,22 +1138,14 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
                 inputTexture: presentation.secondary,
                 scratchBuffer: &secondaryUpscaledScratchTexture,
                 settings: settings,
-                scale: scale
+                target: target
             )
             finalSecondary = secondaryUpscale.texture
             secondaryFellBack = secondaryUpscale.fellBack
         }
 
-        let upscaleAlgorithm: String
-        if !primaryUpscale.fellBack,
-           finalPrimary.width == presentation.primary.width,
-           finalPrimary.height == presentation.primary.height {
-            upscaleAlgorithm = "identity"
-        } else {
-            upscaleAlgorithm = settings.upscalingAlgorithm.rawValue
-        }
         PipelineLog.shared.noteUpscale(
-            algorithm: upscaleAlgorithm,
+            algorithm: primaryUpscale.algorithm,
             inputWidth: presentation.primary.width,
             inputHeight: presentation.primary.height,
             outputWidth: finalPrimary.width,
@@ -1181,7 +1153,6 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
             fellBack: primaryUpscale.fellBack || secondaryFellBack
         )
 
-        
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
             commandBuffer.present(drawable)
             commandBuffer.commit()
@@ -1191,8 +1162,13 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
         encoder.setRenderPipelineState(renderPipelineState)
         lastOutputTexture = finalPrimary
 
+        let presentScale = ScalePlan.presentScale(
+            picture: PixelSize(width: finalPrimary.width, height: finalPrimary.height),
+            drawable: drawablePixels,
+            aspect: aspectMode
+        )
         var uniforms = PresentUniforms(
-            contentScale: presentationScale(sourceTexture: finalPrimary, drawableSize: drawableSize),
+            contentScale: SIMD2<Float>(presentScale.x, presentScale.y),
             texelSize: SIMD2<Float>(
                 1.0 / Float(max(1, finalPrimary.width)),
                 1.0 / Float(max(1, finalPrimary.height))

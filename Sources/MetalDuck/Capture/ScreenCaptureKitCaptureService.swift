@@ -18,7 +18,12 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
     /// Pixels captured when a profile asks for no particular size: the area of 1920×1080,
     /// shaped like the source. Frame generation runs at capture size, so this bounds its cost.
-    static let defaultPixelBudget = CGSize(width: 1920, height: 1080)
+    static let defaultPixelBudget = PixelSize(width: 1920, height: 1080)
+
+    /// The source's own size in pixels, and how many pixels it has per point.
+    private var nativeSize = PixelSize(width: 1, height: 1)
+    private var sourcePointScale: CGFloat = 2
+    private var dynamicInputScale: Double = 1
 
     private let context: MetalContext
     private var captureConfiguration: CaptureConfiguration
@@ -180,11 +185,63 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
     }
 
     func reconfigure(configuration: CaptureConfiguration) async throws {
+        let previous = captureConfiguration
         self.captureConfiguration = configuration
-        let isRunning = stream != nil
-        if isRunning {
+        guard let stream, let streamConfiguration else { return }
+        // The capture rate is applied to each frame as it arrives, so it needs nothing
+        // here. Size, cursor and queue depth change on the running stream; only a
+        // refusal restarts it.
+        guard previous.inputResolution != configuration.inputResolution ||
+              previous.showsCursor != configuration.showsCursor ||
+              previous.queueDepth != configuration.queueDepth else { return }
+        let size = plannedStreamSize()
+        streamConfiguration.width = size.width
+        streamConfiguration.height = size.height
+        streamConfiguration.showsCursor = configuration.showsCursor
+        streamConfiguration.queueDepth = min(max(configuration.queueDepth, 3), 8)
+        do {
+            try await stream.updateConfiguration(streamConfiguration)
+            configuredAspect = CGFloat(size.width) / CGFloat(max(size.height, 1))
+            PipelineLog.shared.event("capture", "stream reconfigured without a restart: \(size.width)x\(size.height), cursor \(configuration.showsCursor ? "shown" : "hidden"), queue depth \(streamConfiguration.queueDepth)")
+        } catch {
+            PipelineLog.shared.event("capture", "could not reconfigure the running stream (\(error.localizedDescription)); restarting it")
             await stop()
             try await start()
+        }
+    }
+
+    func setDynamicInputScale(_ scale: Double) {
+        sampleQueue.async {
+            let clamped = min(max(scale, 0.1), 1)
+            guard abs(clamped - self.dynamicInputScale) > 0.001 else { return }
+            self.dynamicInputScale = clamped
+            self.applyPlannedStreamSize(reason: "dynamic resolution at \(Int((clamped * 100).rounded()))%")
+        }
+    }
+
+    /// The stream size for the source as it is now, under the current settings.
+    private func plannedStreamSize() -> PixelSize {
+        ScalePlan.streamSize(
+            native: nativeSize,
+            requested: captureConfiguration.inputResolution,
+            budget: Self.defaultPixelBudget,
+            dynamicScale: captureConfiguration.inputResolution == nil ? dynamicInputScale : 1
+        )
+    }
+
+    /// Resizes the running stream to `plannedStreamSize()` if that differs from its size.
+    private func applyPlannedStreamSize(reason: String) {
+        guard let stream, let configuration = streamConfiguration else { return }
+        let size = plannedStreamSize()
+        guard size.width != configuration.width || size.height != configuration.height else { return }
+        configuration.width = size.width
+        configuration.height = size.height
+        configuredAspect = CGFloat(size.width) / CGFloat(max(size.height, 1))
+        PipelineLog.shared.event("capture", "\(reason): stream now \(size.width)x\(size.height)")
+        stream.updateConfiguration(configuration) { error in
+            if let error {
+                PipelineLog.shared.event("capture", "could not resize the stream: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -341,21 +398,16 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
     }
 
+    /// Notes the source's own size, and returns the size to capture it at.
     private func resolveCaptureSize(for filter: SCContentFilter) -> (width: Int, height: Int) {
         let info = SCShareableContent.info(for: filter)
-        let nativeWidth = max(1, Int(info.contentRect.width * CGFloat(info.pointPixelScale)))
-        let nativeHeight = max(1, Int(info.contentRect.height * CGFloat(info.pointPixelScale)))
-
-        // Keep to the pixel budget, but never capture more pixels than the source has.
-        let budget = captureConfiguration.preferredPixelSize ?? Self.defaultPixelBudget
-        let budgetArea = max(1.0, budget.width * budget.height)
-        guard Double(nativeWidth * nativeHeight) > budgetArea else {
-            return (nativeWidth, nativeHeight)
-        }
-        let aspect = max(0.1, Double(nativeWidth) / Double(nativeHeight))
-        let width = max(1, Int((budgetArea * aspect).squareRoot().rounded()))
-        let height = max(1, Int((Double(width) / Double(aspect)).rounded()))
-        return (width: width, height: height)
+        sourcePointScale = max(1, CGFloat(info.pointPixelScale))
+        nativeSize = PixelSize(
+            width: max(1, Int(info.contentRect.width * sourcePointScale)),
+            height: max(1, Int(info.contentRect.height * sourcePointScale))
+        )
+        let size = plannedStreamSize()
+        return (size.width, size.height)
     }
 
     private func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
@@ -674,27 +726,20 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
     /// Keeps the stream's shape matching the window's, so a window that changes shape
     /// (entering full screen in the same window, say) is not letterboxed inside the frame.
+    /// `size` is the window's size on screen, in points.
     private func resizeStreamIfNeeded(for size: CGSize) {
-        guard size.width > 1, size.height > 1, let stream, let configuration = streamConfiguration else { return }
+        guard size.width > 1, size.height > 1, stream != nil else { return }
         let aspect = size.width / size.height
         guard configuredAspect > 0, abs(aspect - configuredAspect) / configuredAspect > 0.02 else { return }
         let now = ProcessInfo.processInfo.systemUptime
         guard now - lastResizeUptime > 0.5 else { return }
         lastResizeUptime = now
 
-        // The same pixel count in the new shape.
-        let area = Double(configuration.width * configuration.height)
-        let width = max(2, Int((area * aspect).squareRoot().rounded()))
-        let height = max(2, Int((Double(width) / aspect).rounded()))
-        configuration.width = width
-        configuration.height = height
-        configuredAspect = CGFloat(width) / CGFloat(height)
-        PipelineLog.shared.event("capture", "window changed shape: stream now \(width)x\(height)")
-        stream.updateConfiguration(configuration) { error in
-            if let error {
-                PipelineLog.shared.event("capture", "could not resize the stream: \(error.localizedDescription)")
-            }
-        }
+        nativeSize = PixelSize(
+            width: max(1, Int(size.width * sourcePointScale)),
+            height: max(1, Int(size.height * sourcePointScale))
+        )
+        applyPlannedStreamSize(reason: "window changed shape")
     }
 
     private static func describe(_ selection: Selection) -> String {

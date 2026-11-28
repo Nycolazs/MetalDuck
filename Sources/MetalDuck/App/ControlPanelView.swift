@@ -50,8 +50,10 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didChangeQueueDepth depth: Int)
 
     func controlPanel(_ panel: ControlPanelView, didChangeUpscalingAlgorithm algorithm: UpscalingAlgorithm)
-    func controlPanel(_ panel: ControlPanelView, didChangeOutputScale scale: Float)
-    func controlPanel(_ panel: ControlPanelView, didToggleMatchOutputResolution enabled: Bool)
+    func controlPanel(_ panel: ControlPanelView, didChangeManualResolution manual: Bool)
+    func controlPanel(_ panel: ControlPanelView, didChangeInputResolution size: PixelSize)
+    func controlPanel(_ panel: ControlPanelView, didChangeOutputResolution size: PixelSize)
+    func controlPanel(_ panel: ControlPanelView, didChangeAspectMode mode: AspectMode)
     func controlPanel(_ panel: ControlPanelView, didChangeSamplingMode mode: SamplingMode)
     func controlPanel(_ panel: ControlPanelView, didChangeSharpness value: Float)
 
@@ -126,9 +128,10 @@ final class ControlPanelView: NSView {
 
     // Scaling
     private let upscalerDropdown = CompactDropdown()
-    private let outputScaleSlider = NSSlider(value: 1.5, minValue: 0.75, maxValue: 3.0, target: nil, action: nil)
-    private let outputScaleValueLabel = NSTextField(labelWithString: "1.50×")
-    private let matchOutputResolutionSwitch = GlassSwitch()
+    private let resolutionModeControl = GlassSegmented.make(["Automatic", "Manual"])
+    private let inputResolutionField = ResolutionField(size: PixelSize(width: 1280, height: 720), accessibilityName: "Input")
+    private let outputResolutionField = ResolutionField(size: PixelSize(width: 2560, height: 1440), accessibilityName: "Output")
+    private let aspectControl = GlassSegmented.make(AspectMode.allCases.map(\.rawValue))
     private let samplingControl = GlassSegmented.make(SamplingMode.allCases.map(\.rawValue))
     private let sharpnessSlider = NSSlider(value: 0.0, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let sharpnessValueLabel = NSTextField(labelWithString: "0.00")
@@ -137,7 +140,7 @@ final class ControlPanelView: NSView {
     private let dynamicResolutionSwitch = GlassSwitch()
     private let dynamicMinSlider = NSSlider(value: 0.75, minValue: 0.5, maxValue: 1.0, target: nil, action: nil)
     private let dynamicMinValueLabel = NSTextField(labelWithString: "0.75")
-    private let dynamicMaxSlider = NSSlider(value: 1.0, minValue: 0.6, maxValue: 1.25, target: nil, action: nil)
+    private let dynamicMaxSlider = NSSlider(value: 1.0, minValue: 0.6, maxValue: 1.0, target: nil, action: nil)
     private let dynamicMaxValueLabel = NSTextField(labelWithString: "1.00")
 
     // Frame generation: segment 0 is "Off", the rest map onto FrameGenerationMode.
@@ -207,9 +210,10 @@ final class ControlPanelView: NSView {
             GlassMotion.crossfade(profileTitleLabel, to: profileName, duration: 0.3)
         }
         upscalerDropdown.selectItem(withTitle: settings.upscalingAlgorithm.rawValue)
-        outputScaleSlider.floatValue = settings.outputScale
-        GlassMotion.crossfade(outputScaleValueLabel, to: String(format: "%.2f×", settings.outputScale))
-        matchOutputResolutionSwitch.isOn = settings.matchOutputResolution
+        resolutionModeControl.selectedSegment = settings.manualResolution ? 1 : 0
+        inputResolutionField.size = settings.inputResolution
+        outputResolutionField.size = settings.outputResolution
+        aspectControl.selectedSegment = AspectMode.allCases.firstIndex(of: settings.aspectMode) ?? 0
         samplingControl.selectedSegment = SamplingMode.allCases.firstIndex(of: settings.samplingMode) ?? 0
         sharpnessSlider.floatValue = settings.sharpness
         GlassMotion.crossfade(sharpnessValueLabel, to: String(format: "%.2f", settings.sharpness))
@@ -470,8 +474,22 @@ final class ControlPanelView: NSView {
 
         artifactGuardControl.target = self
         artifactGuardControl.action = #selector(handleArtifactGuardChanged)
+        resolutionModeControl.target = self
+        resolutionModeControl.action = #selector(handleResolutionModeChanged)
+        aspectControl.target = self
+        aspectControl.action = #selector(handleAspectModeChanged)
+        inputResolutionField.onCommit = { [weak self] size in
+            guard let self, !self.isApplyingValues else { return }
+            self.refreshSummary()
+            self.delegate?.controlPanel(self, didChangeInputResolution: size)
+        }
+        outputResolutionField.onCommit = { [weak self] size in
+            guard let self, !self.isApplyingValues else { return }
+            self.refreshSummary()
+            self.delegate?.controlPanel(self, didChangeOutputResolution: size)
+        }
 
-        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown] as [NSView] {
+        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown, resolutionModeControl, aspectControl] as [NSView] {
             control.widthAnchor.constraint(equalToConstant: GlassMetrics.controlWidth).isActive = true
         }
 
@@ -482,7 +500,6 @@ final class ControlPanelView: NSView {
 
         let switches: [(GlassSwitch, Selector)] = [
             (captureCursorSwitch, #selector(handleCursorCaptureChanged)),
-            (matchOutputResolutionSwitch, #selector(handleMatchOutputResolutionChanged)),
             (dynamicResolutionSwitch, #selector(handleDynamicResolutionChanged)),
             (hudSwitch, #selector(handleHUDSwitch))
         ]
@@ -495,7 +512,6 @@ final class ControlPanelView: NSView {
         let sliders: [(NSSlider, Selector)] = [
             (captureFPSSlider, #selector(handleCaptureFPSChanged)),
             (queueDepthSlider, #selector(handleQueueDepthChanged)),
-            (outputScaleSlider, #selector(handleOutputScaleChanged)),
             (sharpnessSlider, #selector(handleSharpnessChanged)),
             (dynamicMinSlider, #selector(handleDynamicMinChanged)),
             (dynamicMaxSlider, #selector(handleDynamicMaxChanged))
@@ -509,7 +525,7 @@ final class ControlPanelView: NSView {
 
     private func applySliderAccent() {
         let color = GlassAccent.color
-        for slider in [captureFPSSlider, queueDepthSlider, outputScaleSlider, sharpnessSlider, dynamicMinSlider, dynamicMaxSlider] {
+        for slider in [captureFPSSlider, queueDepthSlider, sharpnessSlider, dynamicMinSlider, dynamicMaxSlider] {
             slider.trackFillColor = color
         }
     }
@@ -1024,8 +1040,10 @@ final class ControlPanelView: NSView {
     private func makeScalingGroup() -> NSView {
         let group = SettingsGroup(title: "Scaling", symbol: "arrow.up.left.and.arrow.down.right")
         group.addRow(SettingRow.control("Upscaler", symbol: "wand.and.stars", help: "MetalFX Spatial is sharper; Native Linear is cheaper.", control: upscalerDropdown))
-        group.addRow(SettingRow.control("Fit to output", symbol: "display", help: "Scale the source to fill the output window, then apply the factor.", control: matchOutputResolutionSwitch))
-        group.addRow(SettingRow.slider("Scale factor", symbol: "plus.magnifyingglass", slider: outputScaleSlider, value: outputScaleValueLabel))
+        group.addRow(SettingRow.control("Resolution", symbol: "aspectratio", help: "Automatic captures up to about 1920×1080 worth of pixels and scales the picture to the overlay. Manual uses the two sizes below.", control: resolutionModeControl))
+        group.addRow(SettingRow.control("Input", symbol: "arrow.down.right.and.arrow.up.left", help: "The size the source is captured and processed at, in pixels. The source keeps its shape and fits inside this size. It is never captured larger than it is. Lower is faster.", control: inputResolutionField))
+        group.addRow(SettingRow.control("Output", symbol: "arrow.up.left.and.arrow.down.right", help: "The size the picture is scaled to, in pixels. It is held to the overlay's own size, since pixels past that are thrown away.", control: outputResolutionField))
+        group.addRow(SettingRow.control("Aspect", symbol: "rectangle.dashed", help: "When the output's shape differs from the source's: Fit shows everything with bars, Fill crops, Stretch distorts.", control: aspectControl))
         group.addRow(SettingRow.control("Sampling", symbol: "square.grid.3x3", help: "Filter used for native resampling.", control: samplingControl))
         group.addRow(SettingRow.slider("Sharpness", symbol: "circle.lefthalf.filled", help: "Post-process sharpening strength.", slider: sharpnessSlider, value: sharpnessValueLabel))
         return group
@@ -1033,7 +1051,7 @@ final class ControlPanelView: NSView {
 
     private func makeDynamicResolutionGroup() -> NSView {
         let group = SettingsGroup(title: "Dynamic Resolution", symbol: "aspectratio")
-        group.addRow(SettingRow.control("Enabled", symbol: "bolt.badge.automatic", help: "Lower the render scale when output falls behind the target.", control: dynamicResolutionSwitch))
+        group.addRow(SettingRow.control("Enabled", symbol: "bolt.badge.automatic", help: "Capture fewer pixels while the GPU is short of time, and more again when it has room. Minimum and Maximum are shares of the usual capture size per side. Works with Automatic resolution only.", control: dynamicResolutionSwitch))
         group.addRow(SettingRow.slider("Minimum", symbol: "arrow.down.right.and.arrow.up.left", slider: dynamicMinSlider, value: dynamicMinValueLabel))
         group.addRow(SettingRow.slider("Maximum", symbol: "arrow.up.left.and.arrow.down.right", slider: dynamicMaxSlider, value: dynamicMaxValueLabel))
         return group
@@ -1134,7 +1152,9 @@ final class ControlPanelView: NSView {
         if let upscaler = upscalerDropdown.titleOfSelectedItem {
             parts.append(upscaler)
         }
-        parts.append(String(format: "%.2f×", outputScaleSlider.floatValue))
+        if resolutionModeControl.selectedSegment == 1 {
+            parts.append("\(inputResolutionField.size.description) → \(outputResolutionField.size.description)")
+        }
         if let mode = selectedFrameGenerationMode {
             parts.append("\(mode.title) frame generation")
         } else {
@@ -1153,7 +1173,13 @@ final class ControlPanelView: NSView {
     }
 
     private func syncDependentControls() {
-        let dynamicEnabled = dynamicResolutionSwitch.isOn
+        let manual = resolutionModeControl.selectedSegment == 1
+        inputResolutionField.isEnabled = manual
+        outputResolutionField.isEnabled = manual
+        aspectControl.isEnabled = manual
+        // Dynamic resolution changes the capture size itself, which Manual fixes.
+        dynamicResolutionSwitch.isEnabled = !manual
+        let dynamicEnabled = dynamicResolutionSwitch.isOn && !manual
         for (slider, label) in [(dynamicMinSlider, dynamicMinValueLabel), (dynamicMaxSlider, dynamicMaxValueLabel)] {
             slider.isEnabled = dynamicEnabled
             label.textColor = dynamicEnabled ? .secondaryLabelColor : .tertiaryLabelColor
@@ -1279,17 +1305,19 @@ final class ControlPanelView: NSView {
         delegate?.controlPanel(self, didChangeQueueDepth: value)
     }
 
-    @objc private func handleOutputScaleChanged() {
+    @objc private func handleResolutionModeChanged() {
         guard !isApplyingValues else { return }
-        let value = outputScaleSlider.floatValue
-        outputScaleValueLabel.stringValue = String(format: "%.2f×", value)
+        syncDependentControls()
         refreshSummary()
-        delegate?.controlPanel(self, didChangeOutputScale: value)
+        delegate?.controlPanel(self, didChangeManualResolution: resolutionModeControl.selectedSegment == 1)
     }
 
-    @objc private func handleMatchOutputResolutionChanged() {
+    @objc private func handleAspectModeChanged() {
         guard !isApplyingValues else { return }
-        delegate?.controlPanel(self, didToggleMatchOutputResolution: matchOutputResolutionSwitch.isOn)
+        let modes = AspectMode.allCases
+        let index = aspectControl.selectedSegment
+        guard modes.indices.contains(index) else { return }
+        delegate?.controlPanel(self, didChangeAspectMode: modes[index])
     }
 
     @objc private func handleSharpnessChanged() {

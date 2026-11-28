@@ -98,17 +98,19 @@ struct CaptureConfiguration: Codable, Equatable {
     var framesPerSecond: Int
     var queueDepth: Int
     var showsCursor: Bool
-    var preferredPixelSize: CGSize?
+    /// The size to capture at: the largest size of the source's shape that fits inside
+    /// it. Nil means Automatic, which keeps to a pixel budget (`ScalePlan.streamSize`).
+    var inputResolution: PixelSize?
 
     init(
         framesPerSecond: Int = 60,
         queueDepth: Int = 5,
         showsCursor: Bool = false,
-        preferredPixelSize: CGSize? = nil
+        inputResolution: PixelSize? = nil
     ) {
         self.framesPerSecond = framesPerSecond
         self.queueDepth = queueDepth
         self.showsCursor = showsCursor
-        self.preferredPixelSize = preferredPixelSize
+        self.inputResolution = inputResolution
     }
 }

@@ -610,8 +610,11 @@ final class MainViewController: NSViewController {
     }
 
     private func applyProfile(_ profile: Profile) {
-        applySettings(profile.settings)
-        applyCaptureConfiguration(profile.capture)
+        settingsStore.replace(with: profile.settings)
+        // The input size is a render setting that the capture stream carries out.
+        var capture = profile.capture
+        capture.inputResolution = profile.settings.requestedInput
+        applyCaptureConfiguration(capture)
         alignOutputTarget(syncUI: false)
         controlPanel.apply(
             settings: settingsStore.snapshot(),
@@ -619,21 +622,6 @@ final class MainViewController: NSViewController {
             profileName: profile.name
         )
         updateWindowTitle()
-    }
-
-    private func applySettings(_ settings: RenderSettings) {
-        settingsStore.upscalingAlgorithm = settings.upscalingAlgorithm
-        settingsStore.outputScale = settings.outputScale
-        settingsStore.matchOutputResolution = settings.matchOutputResolution
-        settingsStore.samplingMode = settings.samplingMode
-        settingsStore.sharpness = settings.sharpness
-        settingsStore.dynamicResolutionEnabled = settings.dynamicResolutionEnabled
-        settingsStore.dynamicScaleMinimum = settings.dynamicScaleMinimum
-        settingsStore.dynamicScaleMaximum = settings.dynamicScaleMaximum
-        settingsStore.targetPresentationFPS = settings.targetPresentationFPS
-        settingsStore.frameGenerationEnabled = settings.frameGenerationEnabled
-        settingsStore.frameGenerationMode = settings.frameGenerationMode
-        settingsStore.artifactGuard = settings.artifactGuard
     }
 
     private func applyCaptureConfiguration(_ config: CaptureConfiguration) {
@@ -814,11 +802,43 @@ extension MainViewController: ControlPanelViewDelegate {
         panel.setStatus("Upscaling: \(algorithm.rawValue)")
     }
 
-    func controlPanel(_ panel: ControlPanelView, didChangeOutputScale scale: Float) {
+    func controlPanel(_ panel: ControlPanelView, didChangeManualResolution manual: Bool) {
         updateRenderSettings { settings in
-            settings.outputScale = scale
+            settings.manualResolution = manual
         }
-        panel.setStatus(String(format: "Scale factor: %.2fx", scale))
+        syncInputResolution()
+        panel.setStatus(manual ? "Resolution: Manual" : "Resolution: Automatic")
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didChangeInputResolution size: PixelSize) {
+        updateRenderSettings { settings in
+            settings.inputResolution = size
+        }
+        syncInputResolution()
+        panel.setStatus("Input resolution: up to \(size.description)")
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didChangeOutputResolution size: PixelSize) {
+        updateRenderSettings { settings in
+            settings.outputResolution = size
+        }
+        panel.setStatus("Output resolution: \(size.description)")
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didChangeAspectMode mode: AspectMode) {
+        updateRenderSettings { settings in
+            settings.aspectMode = mode
+        }
+        panel.setStatus("Aspect: \(mode.rawValue)")
+    }
+
+    /// Hands the capture stream the input size the render settings now ask for.
+    private func syncInputResolution() {
+        let requested = settingsStore.snapshot().requestedInput
+        guard captureConfiguration.inputResolution != requested else { return }
+        updateCaptureConfiguration { config in
+            config.inputResolution = requested
+        }
     }
 
     func controlPanelDidRequestSettings(_ panel: ControlPanelView) {
@@ -834,13 +854,6 @@ extension MainViewController: ControlPanelViewDelegate {
         presentTransientSheet(GuideViewController())
     }
 
-
-    func controlPanel(_ panel: ControlPanelView, didToggleMatchOutputResolution enabled: Bool) {
-        updateRenderSettings { settings in
-            settings.matchOutputResolution = enabled
-        }
-        panel.setStatus(enabled ? "Match output resolution: On" : "Match output resolution: Off")
-    }
 
     func controlPanel(_ panel: ControlPanelView, didChangeSamplingMode mode: SamplingMode) {
         updateRenderSettings { settings in

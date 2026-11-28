@@ -46,4 +46,43 @@ import Testing
     @Test func frameGenerationMultipliers() {
         #expect(FrameGenerationMode.allCases.map(\.multiplier) == [2, 3, 4])
     }
+
+    /// A profile written by 1.3: scale factor and fit switch, no resolution keys.
+    @Test func settingsFromBeforeManualResolutionLoadAsAutomatic() throws {
+        let json = """
+        {"upscalingAlgorithm":"MetalFX Spatial","outputScale":1.25,"matchOutputResolution":true,
+         "samplingMode":"Linear","sharpness":0.3,"dynamicResolutionEnabled":true,
+         "dynamicScaleMinimum":0.75,"dynamicScaleMaximum":1.25,"targetPresentationFPS":120,
+         "frameGenerationEnabled":true,"frameGenerationMode":"4x (30 -> 120)"}
+        """
+        let settings = try JSONDecoder().decode(RenderSettings.self, from: Data(json.utf8))
+        #expect(!settings.manualResolution)
+        #expect(settings.requestedInput == nil)
+        #expect(settings.requestedOutput == nil)
+        #expect(settings.effectiveAspectMode == .fill)
+        #expect(settings.sharpness == 0.3)
+        // Capture cannot exceed its usual size, so the old 1.25 ceiling comes down to 1.
+        #expect(settings.dynamicScaleMaximum == 1)
+    }
+
+    @Test func manualResolutionAsksForItsSizesAndPausesDynamicResolution() {
+        var settings = RenderSettings(dynamicResolutionEnabled: true)
+        #expect(settings.dynamicResolutionActive)
+        settings.manualResolution = true
+        settings.inputResolution = PixelSize(width: 1280, height: 720)
+        settings.outputResolution = PixelSize(width: 2560, height: 1440)
+        settings.aspectMode = .stretch
+        #expect(settings.requestedInput == PixelSize(width: 1280, height: 720))
+        #expect(settings.requestedOutput == PixelSize(width: 2560, height: 1440))
+        #expect(settings.effectiveAspectMode == .stretch)
+        #expect(!settings.dynamicResolutionActive)
+    }
+
+    /// A capture configuration saved by 1.3 may carry `preferredPixelSize`, which is gone.
+    @Test func oldCaptureConfigurationsStillLoad() throws {
+        let json = #"{"framesPerSecond":30,"queueDepth":6,"showsCursor":false,"preferredPixelSize":[1920,1080]}"#
+        let capture = try JSONDecoder().decode(CaptureConfiguration.self, from: Data(json.utf8))
+        #expect(capture.framesPerSecond == 30)
+        #expect(capture.inputResolution == nil)
+    }
 }

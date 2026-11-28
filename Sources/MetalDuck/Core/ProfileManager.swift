@@ -58,8 +58,6 @@ final class ProfileManager {
             symbol: "gamecontroller",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXSpatial,
-                outputScale: 1.0,
-                matchOutputResolution: true,
                 samplingMode: .linear,
                 sharpness: 0.10,
                 dynamicResolutionEnabled: true,
@@ -81,8 +79,6 @@ final class ProfileManager {
             symbol: "sparkles.tv",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXSpatial,
-                outputScale: 1.25,
-                matchOutputResolution: true,
                 samplingMode: .linear,
                 sharpness: 0.30,
                 dynamicResolutionEnabled: false,
@@ -104,8 +100,6 @@ final class ProfileManager {
             symbol: "play.rectangle",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXSpatial,
-                outputScale: 1.15,
-                matchOutputResolution: true,
                 samplingMode: .linear,
                 sharpness: 0.15,
                 dynamicResolutionEnabled: false,
