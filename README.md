@@ -33,9 +33,9 @@ The overlay follows the source and ignores mouse clicks, so you keep playing or 
 - **Capture.** With or without the cursor. Capture rate is the most frames MetalDuck keeps per second. Queue depth is how many the system may hold before they are used.
 - **Frame generation.** Off, 2×, 3×, or 4×. The output rate is the capture rate times that multiplier, so 30 fps at 4× is 120 fps. It does not have a frame rate of its own.
 - **Scaling.** MetalFX Spatial, or a plain resample, with sampling and sharpness.
-- **Resolution.** Automatic captures up to about 1920×1080 worth of pixels and scales the picture to the overlay. Manual takes an input size and an output size in pixels, an aspect mode (fit, fill, stretch), and a placement.
+- **Resolution.** Auto captures up to about 1920×1080 worth of pixels and scales the picture up to the overlay: cheapest, and softer than the source on a large window. Native captures the source at its own size and scales nothing, so only frame generation runs: sharpest, and the most GPU work. The Anime and Video profiles use Native. Manual takes an input size and an output size in pixels, an aspect mode (fit, fill, stretch), and a placement.
 - **Placement.** Over the source, centred at the output size, or filling the display, so a small window can be shown large. The overlay never takes clicks, so away from the source a click goes to whatever is under the pointer, not to where the picture shows it. That suits video and games that capture the mouse.
-- **Dynamic resolution.** Captures fewer pixels while the GPU is short of time and more when there is headroom. Automatic resolution only.
+- **Dynamic resolution.** Captures fewer pixels while the GPU is short of time and more when there is headroom. Auto resolution only.
 - **Profiles.** Games, Anime, and Video are built in. Changes to your own profiles are saved as you make them. Changes to a built-in profile last until you quit; the `+` button saves what is on screen as your own profile.
 - **Guide.** The book icon in the sidebar explains each control and opens the GitHub repository.
 - **Monitor.** A page inside the main window with live capture, output, and generation numbers, charts, load, and the event log. Click Monitor in the sidebar, then click it again or press Esc to go back.

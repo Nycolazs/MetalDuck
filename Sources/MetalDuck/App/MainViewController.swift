@@ -816,12 +816,19 @@ extension MainViewController: ControlPanelViewDelegate {
         panel.setStatus("Upscaling: \(algorithm.rawValue)")
     }
 
-    func controlPanel(_ panel: ControlPanelView, didChangeManualResolution manual: Bool) {
+    func controlPanel(_ panel: ControlPanelView, didChangeResolutionMode mode: ResolutionMode) {
         updateRenderSettings { settings in
-            settings.manualResolution = manual
+            settings.resolutionMode = mode
         }
         syncInputResolution()
-        panel.setStatus(manual ? "Resolution: Manual" : "Resolution: Automatic")
+        switch mode {
+        case .automatic:
+            panel.setStatus("Resolution: Automatic. Captures up to about 1920×1080 worth of pixels and scales up.")
+        case .native:
+            panel.setStatus("Resolution: Native. The source at its own size, frame generation only.")
+        case .manual:
+            panel.setStatus("Resolution: Manual")
+        }
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeInputResolution size: PixelSize) {

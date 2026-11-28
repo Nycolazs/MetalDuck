@@ -25,6 +25,16 @@ enum AspectMode: String, Codable, Equatable, CaseIterable, Sendable {
     case stretch = "Stretch"
 }
 
+/// How the capture size and the output size are chosen.
+enum ResolutionMode: String, Codable, Equatable, CaseIterable, Sendable {
+    /// Capture within a pixel budget and scale the picture to the overlay. Cheapest.
+    case automatic = "Automatic"
+    /// Capture at the source's own size and scale nothing: frame generation only.
+    case native = "Native"
+    /// The typed input and output sizes.
+    case manual = "Manual"
+}
+
 /// Where the scaled picture goes on screen.
 enum OutputPlacement: String, Codable, Equatable, CaseIterable, Sendable {
     /// Exactly over the source, following it. Clicks land where the picture shows them.
@@ -56,6 +66,10 @@ enum ScalePlan {
     /// The capture service compares a 128×72 grid of points to spot repeated frames and
     /// cuts, and cannot below this size.
     static let minimumInput = PixelSize(width: 128, height: 72)
+
+    /// Asking for this input size means "the source's own size": it is larger than any
+    /// source, and a capture is never larger than its source.
+    static let nativeInput = PixelSize(width: 16384, height: 16384)
 
     /// The size to capture at.
     ///

@@ -50,7 +50,7 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didChangeQueueDepth depth: Int)
 
     func controlPanel(_ panel: ControlPanelView, didChangeUpscalingAlgorithm algorithm: UpscalingAlgorithm)
-    func controlPanel(_ panel: ControlPanelView, didChangeManualResolution manual: Bool)
+    func controlPanel(_ panel: ControlPanelView, didChangeResolutionMode mode: ResolutionMode)
     func controlPanel(_ panel: ControlPanelView, didChangeInputResolution size: PixelSize)
     func controlPanel(_ panel: ControlPanelView, didChangeOutputResolution size: PixelSize)
     func controlPanel(_ panel: ControlPanelView, didChangeAspectMode mode: AspectMode)
@@ -129,7 +129,7 @@ final class ControlPanelView: NSView {
 
     // Scaling
     private let upscalerDropdown = CompactDropdown()
-    private let resolutionModeControl = GlassSegmented.make(["Automatic", "Manual"])
+    private let resolutionModeControl = GlassSegmented.make(["Auto", "Native", "Manual"])
     private let inputResolutionField = ResolutionField(size: PixelSize(width: 1280, height: 720), accessibilityName: "Input")
     private let outputResolutionField = ResolutionField(size: PixelSize(width: 2560, height: 1440), accessibilityName: "Output")
     private let aspectControl = GlassSegmented.make(AspectMode.allCases.map(\.rawValue))
@@ -212,7 +212,7 @@ final class ControlPanelView: NSView {
             GlassMotion.crossfade(profileTitleLabel, to: profileName, duration: 0.3)
         }
         upscalerDropdown.selectItem(withTitle: settings.upscalingAlgorithm.rawValue)
-        resolutionModeControl.selectedSegment = settings.manualResolution ? 1 : 0
+        resolutionModeControl.selectedSegment = ResolutionMode.allCases.firstIndex(of: settings.resolutionMode) ?? 0
         inputResolutionField.size = settings.inputResolution
         outputResolutionField.size = settings.outputResolution
         aspectControl.selectedSegment = AspectMode.allCases.firstIndex(of: settings.aspectMode) ?? 0
@@ -1045,7 +1045,7 @@ final class ControlPanelView: NSView {
     private func makeScalingGroup() -> NSView {
         let group = SettingsGroup(title: "Scaling", symbol: "arrow.up.left.and.arrow.down.right")
         group.addRow(SettingRow.control("Upscaler", symbol: "wand.and.stars", help: "MetalFX Spatial is sharper; Native Linear is cheaper.", control: upscalerDropdown))
-        group.addRow(SettingRow.control("Resolution", symbol: "aspectratio", help: "Automatic captures up to about 1920×1080 worth of pixels and scales the picture to the overlay. Manual uses the two sizes below.", control: resolutionModeControl))
+        group.addRow(SettingRow.control("Resolution", symbol: "aspectratio", help: "Auto captures up to about 1920×1080 worth of pixels and scales the picture up to the overlay: cheapest, and softer than the source on a large window. Native captures the source at its own size and scales nothing, so only frame generation runs: sharpest, and the most GPU work. Manual uses the two sizes below.", control: resolutionModeControl))
         group.addRow(SettingRow.control("Input", symbol: "arrow.down.right.and.arrow.up.left", help: "The size the source is captured and processed at, in pixels. The source keeps its shape and fits inside this size. It is never captured larger than it is. Lower is faster.", control: inputResolutionField))
         group.addRow(SettingRow.control("Output", symbol: "arrow.up.left.and.arrow.down.right", help: "The size the picture is scaled to, in pixels. It is held to the overlay's own size, since pixels past that are thrown away.", control: outputResolutionField))
         group.addRow(SettingRow.control("Placement", symbol: "rectangle.inset.filled", help: "Over source keeps the picture exactly on the source window. Centred shows it at the output size in the middle of the screen, and Fill display covers the screen: use these to show a small window large. The picture never takes clicks, so away from the source a click goes to whatever is under the pointer, not to where the picture shows it. That suits video and games that capture the mouse.", control: placementControl))
@@ -1057,7 +1057,7 @@ final class ControlPanelView: NSView {
 
     private func makeDynamicResolutionGroup() -> NSView {
         let group = SettingsGroup(title: "Dynamic Resolution", symbol: "aspectratio")
-        group.addRow(SettingRow.control("Enabled", symbol: "bolt.badge.automatic", help: "Capture fewer pixels while the GPU is short of time, and more again when it has room. Minimum and Maximum are shares of the usual capture size per side. Works with Automatic resolution only.", control: dynamicResolutionSwitch))
+        group.addRow(SettingRow.control("Enabled", symbol: "bolt.badge.automatic", help: "Capture fewer pixels while the GPU is short of time, and more again when it has room. Minimum and Maximum are shares of the usual capture size per side. Works with Auto resolution only.", control: dynamicResolutionSwitch))
         group.addRow(SettingRow.slider("Minimum", symbol: "arrow.down.right.and.arrow.up.left", slider: dynamicMinSlider, value: dynamicMinValueLabel))
         group.addRow(SettingRow.slider("Maximum", symbol: "arrow.up.left.and.arrow.down.right", slider: dynamicMaxSlider, value: dynamicMaxValueLabel))
         return group
@@ -1158,7 +1158,12 @@ final class ControlPanelView: NSView {
         if let upscaler = upscalerDropdown.titleOfSelectedItem {
             parts.append(upscaler)
         }
-        if resolutionModeControl.selectedSegment == 1 {
+        switch selectedResolutionMode {
+        case .automatic:
+            break
+        case .native:
+            parts.append("Native resolution")
+        case .manual:
             parts.append("\(inputResolutionField.size.description) → \(outputResolutionField.size.description)")
         }
         if let mode = selectedFrameGenerationMode {
@@ -1179,14 +1184,15 @@ final class ControlPanelView: NSView {
     }
 
     private func syncDependentControls() {
-        let manual = resolutionModeControl.selectedSegment == 1
+        let manual = selectedResolutionMode == .manual
         inputResolutionField.isEnabled = manual
         outputResolutionField.isEnabled = manual
         aspectControl.isEnabled = manual
         placementControl.isEnabled = manual
-        // Dynamic resolution changes the capture size itself, which Manual fixes.
-        dynamicResolutionSwitch.isEnabled = !manual
-        let dynamicEnabled = dynamicResolutionSwitch.isOn && !manual
+        // Dynamic resolution changes the capture size itself, which Native and Manual fix.
+        let automatic = selectedResolutionMode == .automatic
+        dynamicResolutionSwitch.isEnabled = automatic
+        let dynamicEnabled = dynamicResolutionSwitch.isOn && automatic
         for (slider, label) in [(dynamicMinSlider, dynamicMinValueLabel), (dynamicMaxSlider, dynamicMaxValueLabel)] {
             slider.isEnabled = dynamicEnabled
             label.textColor = dynamicEnabled ? .secondaryLabelColor : .tertiaryLabelColor
@@ -1316,7 +1322,13 @@ final class ControlPanelView: NSView {
         guard !isApplyingValues else { return }
         syncDependentControls()
         refreshSummary()
-        delegate?.controlPanel(self, didChangeManualResolution: resolutionModeControl.selectedSegment == 1)
+        delegate?.controlPanel(self, didChangeResolutionMode: selectedResolutionMode)
+    }
+
+    private var selectedResolutionMode: ResolutionMode {
+        let modes = ResolutionMode.allCases
+        let index = resolutionModeControl.selectedSegment
+        return modes.indices.contains(index) ? modes[index] : .automatic
     }
 
     @objc private func handlePlacementChanged() {

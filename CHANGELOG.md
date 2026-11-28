@@ -8,7 +8,8 @@ Not yet run end to end: this version builds and its tests pass, but the picker, 
 
 ### Added
 - **Choose the source in the macOS picker.** The Choose button opens the system's own window, app and display picker. Choosing an app scales its main window. Choosing again while scaling runs switches the source without stopping. Start with nothing chosen opens the picker first, and the last app and window are remembered.
-- **Manual input and output resolution.** Resolution is Automatic or Manual. Manual takes an input size, which the source is captured and processed at, and an output size, which the picture is scaled to, both in pixels, with presets. Aspect chooses between bars, cropping and stretching when the shapes differ.
+- **Native resolution: frame generation without scaling.** Native captures the source at its own size and skips the scaler, so the picture is as sharp as the source. The Anime and Video profiles now use it. Auto still captures within about 1920×1080 worth of pixels and scales up, which is cheaper and softer on a large window; Games keeps Auto.
+- **Manual input and output resolution.** Manual takes an input size, which the source is captured and processed at, and an output size, which the picture is scaled to, both in pixels, with presets. Aspect chooses between bars, cropping and stretching when the shapes differ.
 - **Placement.** In Manual, the picture can stay over the source, sit centred at the output size, or fill the display, so a small window can be shown large. The overlay still never takes clicks: away from the source they go to whatever is under the pointer.
 - A test target and a CI workflow. `swift test` covers frame timing, the size and placement arithmetic, and how saved settings load.
 

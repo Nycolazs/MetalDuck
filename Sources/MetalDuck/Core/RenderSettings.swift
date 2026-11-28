@@ -61,9 +61,10 @@ enum ArtifactGuard: String, Codable, Equatable, CaseIterable {
 
 struct RenderSettings: Codable, Equatable {
     var upscalingAlgorithm: UpscalingAlgorithm
-    /// Off (Automatic): capture keeps to a pixel budget and the picture is scaled to the
-    /// overlay. On (Manual): `inputResolution` and `outputResolution` are used.
-    var manualResolution: Bool
+    /// Automatic: capture keeps to a pixel budget and the picture is scaled to the overlay.
+    /// Native: capture at the source's own size, with no scaling. Manual:
+    /// `inputResolution` and `outputResolution` are used.
+    var resolutionMode: ResolutionMode
     /// Manual only. The capture is the largest size of the source's shape that fits inside it.
     var inputResolution: PixelSize
     /// Manual only. The size the scaler renders to, held to the overlay's own size.
@@ -86,7 +87,7 @@ struct RenderSettings: Codable, Equatable {
 
     init(
         upscalingAlgorithm: UpscalingAlgorithm = .metalFXSpatial,
-        manualResolution: Bool = false,
+        resolutionMode: ResolutionMode = .automatic,
         inputResolution: PixelSize = PixelSize(width: 1280, height: 720),
         outputResolution: PixelSize = PixelSize(width: 2560, height: 1440),
         aspectMode: AspectMode = .fit,
@@ -102,7 +103,7 @@ struct RenderSettings: Codable, Equatable {
         artifactGuard: ArtifactGuard = .balanced
     ) {
         self.upscalingAlgorithm = upscalingAlgorithm
-        self.manualResolution = manualResolution
+        self.resolutionMode = resolutionMode
         self.inputResolution = inputResolution
         self.outputResolution = outputResolution
         self.aspectMode = aspectMode
@@ -118,19 +119,27 @@ struct RenderSettings: Codable, Equatable {
         self.artifactGuard = artifactGuard
     }
 
+    var manualResolution: Bool { resolutionMode == .manual }
+
     /// The capture size these settings ask for: nil in Automatic.
-    var requestedInput: PixelSize? { manualResolution ? inputResolution : nil }
+    var requestedInput: PixelSize? {
+        switch resolutionMode {
+        case .automatic: return nil
+        case .native: return ScalePlan.nativeInput
+        case .manual: return inputResolution
+        }
+    }
     /// The render size these settings ask for: nil in Automatic.
     var requestedOutput: PixelSize? { manualResolution ? outputResolution : nil }
     /// Automatic fills the overlay, as it always has.
     var effectiveAspectMode: AspectMode { manualResolution ? aspectMode : .fill }
     /// Automatic keeps the overlay on the source.
     var effectivePlacement: OutputPlacement { manualResolution ? outputPlacement : .overSource }
-    /// Dynamic resolution only acts in Automatic: Manual sizes are the user's to keep.
-    var dynamicResolutionActive: Bool { dynamicResolutionEnabled && !manualResolution }
+    /// Dynamic resolution only acts in Automatic: Native and Manual sizes are the user's to keep.
+    var dynamicResolutionActive: Bool { dynamicResolutionEnabled && resolutionMode == .automatic }
 
     private enum CodingKeys: String, CodingKey {
-        case upscalingAlgorithm, manualResolution, inputResolution, outputResolution, aspectMode
+        case upscalingAlgorithm, resolutionMode, inputResolution, outputResolution, aspectMode
         case outputPlacement
         case samplingMode, sharpness
         case dynamicResolutionEnabled, dynamicScaleMinimum, dynamicScaleMaximum
@@ -144,7 +153,7 @@ struct RenderSettings: Codable, Equatable {
         let defaults = RenderSettings()
         let container = try decoder.container(keyedBy: CodingKeys.self)
         upscalingAlgorithm = try container.decode(UpscalingAlgorithm.self, forKey: .upscalingAlgorithm)
-        manualResolution = try container.decodeIfPresent(Bool.self, forKey: .manualResolution) ?? defaults.manualResolution
+        resolutionMode = try container.decodeIfPresent(ResolutionMode.self, forKey: .resolutionMode) ?? defaults.resolutionMode
         inputResolution = try container.decodeIfPresent(PixelSize.self, forKey: .inputResolution) ?? defaults.inputResolution
         outputResolution = try container.decodeIfPresent(PixelSize.self, forKey: .outputResolution) ?? defaults.outputResolution
         aspectMode = try container.decodeIfPresent(AspectMode.self, forKey: .aspectMode) ?? defaults.aspectMode

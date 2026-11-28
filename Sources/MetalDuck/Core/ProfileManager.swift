@@ -79,6 +79,8 @@ final class ProfileManager {
             symbol: "sparkles.tv",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXSpatial,
+                // The source as it is: scaling a smaller capture up softens video.
+                resolutionMode: .native,
                 samplingMode: .linear,
                 sharpness: 0.30,
                 dynamicResolutionEnabled: false,
@@ -100,6 +102,8 @@ final class ProfileManager {
             symbol: "play.rectangle",
             settings: RenderSettings(
                 upscalingAlgorithm: .metalFXSpatial,
+                // The source as it is: scaling a smaller capture up softens video.
+                resolutionMode: .native,
                 samplingMode: .linear,
                 sharpness: 0.15,
                 dynamicResolutionEnabled: false,

@@ -52,6 +52,14 @@ Checks:
 2. Keep capture dynamic range in SDR (default in this project).
 3. Verify your display profile is not switching between SDR/HDR modes.
 
+## The picture is softer than the source
+
+Resolution is on Auto, which captures up to about 1920×1080 worth of pixels and scales
+that up. Set Resolution to `Native` to capture the source at its own size with no
+scaling. It costs more GPU time; if output fps drops, go back to Auto or lower the
+multiplier. In-between frames are built from motion estimates, so fast motion can still
+look a little softer than a real frame.
+
 ## Capture works but quality looks unchanged
 
 Checks:

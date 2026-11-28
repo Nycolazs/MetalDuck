@@ -936,7 +936,7 @@ final class PipelineLog: @unchecked Sendable {
         let fg = settings.frameGenerationEnabled
             ? "frame generation ON \(settings.frameGenerationMode.rawValue)  artifactGuard=\(settings.artifactGuard.rawValue)"
             : "frame generation OFF"
-        return "\(fg)  upscale=\(settings.upscalingAlgorithm.rawValue)  resolution=\(settings.manualResolution ? "manual \(settings.inputResolution.description) -> \(settings.outputResolution.description) \(settings.aspectMode.rawValue)" : "automatic")  sharpness=\(String(format: "%.2f", settings.sharpness))  drs=\(settings.dynamicResolutionEnabled)  configuredCapture=\(captureFPS)fps  target=\(settings.targetPresentationFPS)fps"
+        return "\(fg)  upscale=\(settings.upscalingAlgorithm.rawValue)  resolution=\(settings.manualResolution ? "manual \(settings.inputResolution.description) -> \(settings.outputResolution.description) \(settings.aspectMode.rawValue)" : settings.resolutionMode.rawValue.lowercased())  sharpness=\(String(format: "%.2f", settings.sharpness))  drs=\(settings.dynamicResolutionEnabled)  configuredCapture=\(captureFPS)fps  target=\(settings.targetPresentationFPS)fps"
     }
 
     private static func generationExplanation(settings: RenderSettings, captureFPS: Int) -> String {

@@ -68,7 +68,7 @@ import Testing
     @Test func manualResolutionAsksForItsSizesAndPausesDynamicResolution() {
         var settings = RenderSettings(dynamicResolutionEnabled: true)
         #expect(settings.dynamicResolutionActive)
-        settings.manualResolution = true
+        settings.resolutionMode = .manual
         settings.inputResolution = PixelSize(width: 1280, height: 720)
         settings.outputResolution = PixelSize(width: 2560, height: 1440)
         settings.aspectMode = .stretch
@@ -84,5 +84,42 @@ import Testing
         let capture = try JSONDecoder().decode(CaptureConfiguration.self, from: Data(json.utf8))
         #expect(capture.framesPerSecond == 30)
         #expect(capture.inputResolution == nil)
+    }
+
+    @Test func nativeResolutionAsksForTheSourceAsItIs() {
+        let settings = RenderSettings(resolutionMode: .native, dynamicResolutionEnabled: true)
+        #expect(settings.requestedInput == ScalePlan.nativeInput)
+        #expect(settings.requestedOutput == nil)
+        #expect(settings.effectivePlacement == .overSource)
+        #expect(!settings.dynamicResolutionActive)
+        // Asked for that, any source is captured at its own size, past the pixel budget.
+        let budget = PixelSize(width: 1920, height: 1080)
+        for native in [PixelSize(width: 3456, height: 2234), PixelSize(width: 1280, height: 720), PixelSize(width: 5120, height: 2880)] {
+            #expect(ScalePlan.streamSize(native: native, requested: settings.requestedInput, budget: budget) == native)
+        }
+    }
+
+    /// Over the source, a native capture needs no scaler: the overlay shows it pixel for pixel.
+    @Test func nativeResolutionSkipsTheScaler() {
+        let capture = PixelSize(width: 3456, height: 2234)
+        let crop = CGRect(x: 0, y: 0, width: 1, height: 1116.0 / 1117.0)
+        let drawable = PixelSize(width: 3456, height: 2232)
+        let target = ScalePlan.renderSize(
+            input: capture,
+            requested: nil,
+            drawable: ScalePlan.drawable(drawable, showing: crop),
+            aspect: .fill
+        )
+        #expect(target == capture)
+    }
+
+    @Test func videoProfilesShipAtNativeResolution() async {
+        let modes = await MainActor.run {
+            let manager = ProfileManager(defaults: UserDefaults(suiteName: "metalduck.tests.\(UUID().uuidString)")!)
+            return Dictionary(uniqueKeysWithValues: manager.profiles.map { ($0.name, $0.settings.resolutionMode) })
+        }
+        #expect(modes["Anime"] == .native)
+        #expect(modes["Video"] == .native)
+        #expect(modes["Games"] == .automatic)
     }
 }

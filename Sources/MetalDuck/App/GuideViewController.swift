@@ -280,13 +280,13 @@ private struct GuideTopic {
             sketch: .scaling,
             title: "Scaling",
             affects: "Changes how large and how sharp the picture is drawn.",
-            body: "Automatic captures up to about 1920×1080 worth of pixels and scales the picture to the overlay. Manual takes two sizes in pixels. Input is what the source is captured and processed at: lower is faster. Output is what the picture is scaled to. Placement keeps the picture on the source, or shows it centred or across the display, so a small window can be shown large. The picture never takes clicks, so away from the source a click lands on whatever is under the pointer: fine for video and for games that capture the mouse. Aspect decides between bars, cropping and stretching when the shapes differ. MetalFX Spatial rebuilds detail when scaling up; Linear only resamples and costs less. Sharpness runs after the resize."
+            body: "Auto captures up to about 1920×1080 worth of pixels and scales the picture up to the overlay: the cheapest, and softer than the source on a large window. Native captures the source at its own size and scales nothing, so only frame generation runs: the sharpest, and the most work for the GPU. Manual takes two sizes in pixels. Input is what the source is captured and processed at: lower is faster. Output is what the picture is scaled to. Placement keeps the picture on the source, or shows it centred or across the display, so a small window can be shown large. The picture never takes clicks, so away from the source a click lands on whatever is under the pointer: fine for video and for games that capture the mouse. Aspect decides between bars, cropping and stretching when the shapes differ. MetalFX Spatial rebuilds detail when scaling up; Linear only resamples and costs less. Sharpness runs after the resize."
         ),
         GuideTopic(
             sketch: .resolution,
             title: "Dynamic resolution",
             affects: "Gives up capture size when the GPU cannot keep up.",
-            body: "When the GPU runs short of time for a frame, the source is captured a step smaller, down to Minimum, and a step larger again when there is room, up to Maximum. Frame generation works at capture size, so that is where the time comes back. The picture gets a little softer instead of stuttering. It works with Automatic resolution only."
+            body: "When the GPU runs short of time for a frame, the source is captured a step smaller, down to Minimum, and a step larger again when there is room, up to Maximum. Frame generation works at capture size, so that is where the time comes back. The picture gets a little softer instead of stuttering. It works with Auto resolution only."
         ),
         GuideTopic(
             sketch: .session,
