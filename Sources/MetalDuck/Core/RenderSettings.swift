@@ -5,7 +5,14 @@ import AppKit
 enum UpscalingAlgorithm: String, Codable, Equatable, CaseIterable {
     case nativeLinear = "Native Linear"
     case metalFXSpatial = "MetalFX Spatial"
-    case metalFXTemporal = "MetalFX Temporal"
+
+    /// Profiles saved before 1.4 may say "MetalFX Temporal". That option always ran the
+    /// spatial scaler (a temporal one needs depth and motion a screen capture does not
+    /// have), so it loads as Spatial.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = UpscalingAlgorithm(rawValue: raw) ?? .metalFXSpatial
+    }
 }
 
 enum SamplingMode: String, Codable, Equatable, CaseIterable {

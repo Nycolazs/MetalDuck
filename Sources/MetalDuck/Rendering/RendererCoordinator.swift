@@ -24,10 +24,24 @@ struct RendererStats {
     var effectiveScale: Float
 }
 
-enum RendererCoordinatorError: Error {
-    case shaderCompilationFailed
+enum RendererCoordinatorError: LocalizedError {
+    case shaderSourceMissing
+    case shaderCompilationFailed(String)
     case functionLookupFailed
     case pipelineCreationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .shaderSourceMissing:
+            return "Present.metal was not found in the app's resources. Reinstall MetalDuck, or rebuild it with `swift build`."
+        case .shaderCompilationFailed(let reason):
+            return "The Metal shaders did not compile: \(reason)"
+        case .functionLookupFailed:
+            return "The Metal shaders are missing the present functions."
+        case .pipelineCreationFailed:
+            return "The Metal render pipeline could not be created."
+        }
+    }
 }
 
 final class RendererCoordinator: NSObject {
@@ -51,6 +65,8 @@ final class RendererCoordinator: NSObject {
 
 
     private let statsLock = NSLock()
+    /// Frames the source sent, before repeats are skipped and the rate cap is applied.
+    private var sourceFrameCounter: Int = 0
     private var rawCaptureFrameCounter: Int = 0
     private var presentFrameCounter: Int = 0
     private var generatedFrameCounter: Int = 0
@@ -338,6 +354,13 @@ final class RendererCoordinator: NSObject {
             self.ingest(frame: frame, arrival: arrival)
         }
 
+        captureService.onSourceFrame = { [weak self] in
+            guard let self else { return }
+            self.statsLock.lock()
+            self.sourceFrameCounter += 1
+            self.statsLock.unlock()
+        }
+
         captureService.onError = { [weak self] error in
             PipelineLog.shared.event("capture", "stream stopped with error: \(error.localizedDescription)")
             if let self {
@@ -392,6 +415,7 @@ final class RendererCoordinator: NSObject {
         lastEffectiveScale = 1.0
 
         statsLock.lock()
+        sourceFrameCounter = 0
         rawCaptureFrameCounter = 0
         presentFrameCounter = 0
         generatedFrameCounter = 0
@@ -409,7 +433,7 @@ final class RendererCoordinator: NSObject {
         do {
             library = try device.makeLibrary(source: source, options: nil)
         } catch {
-            throw RendererCoordinatorError.shaderCompilationFailed
+            throw RendererCoordinatorError.shaderCompilationFailed(error.localizedDescription)
         }
 
         guard let vertexFunction = library.makeFunction(name: "vertexFullscreen"),
@@ -471,83 +495,8 @@ final class RendererCoordinator: NSObject {
             }
         }
 
-        // Guaranteed fallback to keep startup resilient when SPM resource path differs.
-        return """
-#include <metal_stdlib>
-using namespace metal;
-
-struct PresentUniforms {
-    float2 contentScale;
-    float2 texelSize;
-    float sharpness;
-    float blendFactor;
-};
-
-struct VertexOut {
-    float4 position [[position]];
-    float2 uv;
-};
-
-vertex VertexOut vertexFullscreen(uint vertexID [[vertex_id]], constant PresentUniforms &uniforms [[buffer(0)]]) {
-    constexpr float2 positions[3] = {
-        float2(-1.0, -1.0),
-        float2(3.0, -1.0),
-        float2(-1.0, 3.0)
-    };
-
-    constexpr float2 uvs[3] = {
-        float2(0.0, 1.0),
-        float2(2.0, 1.0),
-        float2(0.0, -1.0)
-    };
-
-    VertexOut out;
-    float2 position = positions[vertexID];
-    position *= uniforms.contentScale;
-    out.position = float4(position, 0.0, 1.0);
-    out.uv = uvs[vertexID];
-    return out;
-}
-
-fragment float4 fragmentPresent(
-    VertexOut in [[stage_in]],
-    texture2d<float> sourceTextureA [[texture(0)]],
-    texture2d<float> sourceTextureB [[texture(1)]],
-    sampler sourceSampler [[sampler(0)]],
-    constant PresentUniforms &uniforms [[buffer(0)]]
-) {
-    float2 uv = saturate(in.uv);
-    float blendFactor = saturate(uniforms.blendFactor);
-    float3 centerA = sourceTextureA.sample(sourceSampler, uv).rgb;
-    float3 centerB = sourceTextureB.sample(sourceSampler, uv).rgb;
-    float3 center = mix(centerA, centerB, blendFactor);
-
-    if (uniforms.sharpness <= 0.001) {
-        return float4(center, 1.0);
-    }
-
-    float2 tx = uniforms.texelSize;
-    float3 northA = sourceTextureA.sample(sourceSampler, saturate(uv + float2(0.0, -tx.y))).rgb;
-    float3 southA = sourceTextureA.sample(sourceSampler, saturate(uv + float2(0.0, tx.y))).rgb;
-    float3 eastA = sourceTextureA.sample(sourceSampler, saturate(uv + float2(tx.x, 0.0))).rgb;
-    float3 westA = sourceTextureA.sample(sourceSampler, saturate(uv + float2(-tx.x, 0.0))).rgb;
-
-    float3 northB = sourceTextureB.sample(sourceSampler, saturate(uv + float2(0.0, -tx.y))).rgb;
-    float3 southB = sourceTextureB.sample(sourceSampler, saturate(uv + float2(0.0, tx.y))).rgb;
-    float3 eastB = sourceTextureB.sample(sourceSampler, saturate(uv + float2(tx.x, 0.0))).rgb;
-    float3 westB = sourceTextureB.sample(sourceSampler, saturate(uv + float2(-tx.x, 0.0))).rgb;
-
-    float3 north = mix(northA, northB, blendFactor);
-    float3 south = mix(southA, southB, blendFactor);
-    float3 east = mix(eastA, eastB, blendFactor);
-    float3 west = mix(westA, westB, blendFactor);
-    float3 neighbors = (north + south + east + west) * 0.25;
-    float amount = uniforms.sharpness * 1.35;
-    float3 sharpened = center + (center - neighbors) * amount;
-    float3 color = clamp(sharpened, float3(0.0), float3(1.0));
-    return float4(color, 1.0);
-}
-"""
+        // No fallback: a cut-down shader would start the app with frame generation broken.
+        throw RendererCoordinatorError.shaderSourceMissing
     }
 
     private func ensureReusableTexture(
@@ -883,7 +832,7 @@ fragment float4 fragmentPresent(
             )
             return (outputTexture, false)
 
-        case .metalFXSpatial, .metalFXTemporal:
+        case .metalFXSpatial:
             guard let outputTexture = ensureReusableTexture(
                 texture: &scratchBuffer,
                 width: outputWidth,
@@ -1082,7 +1031,8 @@ fragment float4 fragmentPresent(
             let captureFPS = Double(rawCaptureFrameCounter) / elapsed
             let presentFPS = Double(presentFrameCounter) / elapsed
             let generatedFPS = Double(generatedFrameCounter) / elapsed
-            let sourceFPS = captureFPS
+            let sourceFPS = Double(sourceFrameCounter) / elapsed
+            sourceFrameCounter = 0
             rawCaptureFrameCounter = 0
             presentFrameCounter = 0
             generatedFrameCounter = 0

@@ -1082,6 +1082,15 @@ final class ControlPanelView: NSView {
             : "Frame generation is off, so output matches the capture rate."
     }
 
+    /// Marks a built-in profile whose values were changed. They last until the app quits.
+    func setProfileEdited(_ edited: Bool) {
+        guard edited != isProfileEdited else { return }
+        isProfileEdited = edited
+        refreshSummary()
+    }
+
+    private var isProfileEdited = false
+
     private func refreshSummary() {
         var parts: [String] = []
         if let upscaler = upscalerDropdown.titleOfSelectedItem {
@@ -1095,6 +1104,9 @@ final class ControlPanelView: NSView {
         }
         if resolvedTargetFPS > 0 {
             parts.append("\(resolvedTargetFPS) fps output")
+        }
+        if isProfileEdited {
+            parts.append("Edited: press + to keep")
         }
         summaryText = parts.joined(separator: "  ·  ")
         if page == .controls {

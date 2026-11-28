@@ -9,8 +9,22 @@ final class ProfileManager {
     private let storageKey = "com.metalduck.profiles"
     private let activeProfileIdKey = "com.metalduck.activeProfileId"
     
+    private let defaults: UserDefaults
+    /// The built-in profiles as shipped, to tell when one has been changed this session.
+    private let builtInDefaults: [Profile]
+
     private(set) var profiles: [Profile] = []
     private(set) var activeProfileId: UUID
+
+    /// True while the active profile is a built-in one whose values were changed. Those
+    /// changes last until the app quits; saving them as a new profile keeps them.
+    var isActiveBuiltInEdited: Bool {
+        let active = activeProfile
+        guard active.isBuiltIn, let shipped = builtInDefaults.first(where: { $0.id == active.id }) else {
+            return false
+        }
+        return shipped.settings != active.settings || shipped.capture != active.capture
+    }
     
     var activeProfile: Profile {
         if let found = profiles.first(where: { $0.id == activeProfileId }) {
@@ -30,19 +44,20 @@ final class ProfileManager {
         )
     }
     
-    private init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         // Built-in profiles optimized for specific use cases
         
         // Built-in IDs are fixed so the active preset survives relaunches.
 
-        // Games: High capture rate, temporal upscaling, dynamic resolution
+        // Games: High capture rate, dynamic resolution
         // Optimized for real-time game content with fast motion
         let games = Profile(
             id: UUID(uuidString: "6D3A4C1E-0001-4B6E-9C1D-4D7E7A11D001")!,
             name: "Games",
             symbol: "gamecontroller",
             settings: RenderSettings(
-                upscalingAlgorithm: .metalFXTemporal,
+                upscalingAlgorithm: .metalFXSpatial,
                 outputScale: 1.0,
                 matchOutputResolution: true,
                 samplingMode: .linear,
@@ -104,8 +119,10 @@ final class ProfileManager {
             isBuiltIn: true
         )
         
+        self.builtInDefaults = [games, anime, video]
+
         // Load saved profiles or use defaults
-        if let data = UserDefaults.standard.data(forKey: storageKey),
+        if let data = defaults.data(forKey: storageKey),
            let saved = try? JSONDecoder().decode([Profile].self, from: data) {
             let custom = saved.filter { !$0.isBuiltIn }.map { profile -> Profile in
                 var cleaned = profile
@@ -118,7 +135,7 @@ final class ProfileManager {
         }
         
         // Restore active profile
-        if let idString = UserDefaults.standard.string(forKey: activeProfileIdKey),
+        if let idString = defaults.string(forKey: activeProfileIdKey),
            let id = UUID(uuidString: idString),
            profiles.contains(where: { $0.id == id }) {
             self.activeProfileId = id
@@ -131,7 +148,7 @@ final class ProfileManager {
     func selectProfile(id: UUID) {
         guard profiles.contains(where: { $0.id == id }) else { return }
         activeProfileId = id
-        UserDefaults.standard.set(id.uuidString, forKey: activeProfileIdKey)
+        defaults.set(id.uuidString, forKey: activeProfileIdKey)
     }
     
     /// Creates a new custom profile with the given parameters and saves it.
@@ -170,7 +187,7 @@ final class ProfileManager {
         profiles.remove(at: index)
         if activeProfileId == id {
             activeProfileId = profiles[1].id // Default to Anime
-            UserDefaults.standard.set(activeProfileId.uuidString, forKey: activeProfileIdKey)
+            defaults.set(activeProfileId.uuidString, forKey: activeProfileIdKey)
         }
         saveCustomProfiles()
     }
@@ -191,7 +208,7 @@ final class ProfileManager {
     private func saveCustomProfiles() {
         let custom = profiles.filter { !$0.isBuiltIn }
         if let data = try? JSONEncoder().encode(custom) {
-            UserDefaults.standard.set(data, forKey: storageKey)
+            defaults.set(data, forKey: storageKey)
         }
     }
 }

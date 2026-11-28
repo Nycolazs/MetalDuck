@@ -25,12 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "session",
                 "launch device=\(metalContext.device.name) log=\(PipelineLog.shared.fileURL?.path ?? "memory only")"
             )
-            let captureConfiguration = CaptureConfiguration(
-                framesPerSecond: 30,
-                queueDepth: 5,
-                showsCursor: false,
-                preferredPixelSize: CGSize(width: 1920, height: 1080)
-            )
+            // The view controller owns the capture configuration and pushes every change
+            // to the service. This is only what the service holds until the first push.
+            let captureConfiguration = ProfileManager.shared.activeProfile.capture
             let initialTarget: CaptureTarget = .window(nil)
 
             let controlWindow = NSWindow(
@@ -79,7 +76,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             Task { await viewController.start() }
             requestScreenCapturePermissionIfNeededAsync()
-            requestAccessibilityPermissionIfNeededAsync()
         } catch {
             print("CRITICAL: Bootstrap failed: \(error)")
             presentFatalInitializationError(error)
@@ -125,12 +121,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         _ = CGRequestScreenCaptureAccess()
-    }
-
-    private func requestAccessibilityPermissionIfNeededAsync() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-            _ = AXIsProcessTrustedWithOptions(options)
-        }
     }
 }

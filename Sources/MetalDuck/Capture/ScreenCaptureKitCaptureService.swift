@@ -5,28 +5,20 @@ import Foundation
 import Metal
 @preconcurrency import ScreenCaptureKit
 
-enum CaptureStaleError: LocalizedError {
-    case framesStalled
-
-    var errorDescription: String? {
-        switch self {
-        case .framesStalled:
-            return "Source stopped delivering frames. The window may have changed (e.g. fullscreen). Try refreshing sources or switching to Display capture."
-        }
-    }
-}
-
-@available(macOS 12.3, *)
 enum ScreenCaptureServiceError: Error {
     case noShareableDisplay
     case noShareableWindow
     case streamOutputRegistrationFailed
 }
 
-@available(macOS 12.3, *)
 final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unchecked Sendable {
     var onFrame: ((CapturedFrame) -> Void)?
     var onError: ((Error) -> Void)?
+    var onSourceFrame: (() -> Void)?
+
+    /// Pixels captured when a profile asks for no particular size: the area of 1920×1080,
+    /// shaped like the source. Frame generation runs at capture size, so this bounds its cost.
+    static let defaultPixelBudget = CGSize(width: 1920, height: 1080)
 
     private let context: MetalContext
     private var captureConfiguration: CaptureConfiguration
@@ -99,13 +91,8 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         // below by timestamp instead.
         streamConfiguration.minimumFrameInterval = .zero
         
-        if #available(macOS 15.0, *) {
-            streamConfiguration.captureDynamicRange = .SDR
-        }
-
-        if #available(macOS 13.0, *) {
-            streamConfiguration.capturesAudio = false
-        }
+        streamConfiguration.captureDynamicRange = .SDR
+        streamConfiguration.capturesAudio = false
 
         let stream = SCStream(filter: filter, configuration: streamConfiguration, delegate: self)
 
@@ -263,50 +250,29 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             let currentPID = ProcessInfo.processInfo.processIdentifier
             let ownWindows = shareableContent.windows.filter { $0.owningApplication?.processID == currentPID }
             let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
-            if #available(macOS 14.2, *) {
-                filter.includeMenuBar = false
-            }
+            filter.includeMenuBar = false
             return filter
 
         case .window(let window):
-            if #available(macOS 13.0, *) {
-                return SCContentFilter(desktopIndependentWindow: window)
-            } else {
-                // macOS 12.3: desktopIndependentWindow is not available.
-                // Fallback to display-based filter.
-                if let display = shareableContent.displays.first {
-                    return SCContentFilter(display: display, excludingWindows: [])
-                } else {
-                    // This should theoretically not happen if ScreenCaptureKit is working,
-                    // but we must return something.
-                    fatalError("No shareable displays found during filter creation on macOS 12")
-                }
-            }
+            return SCContentFilter(desktopIndependentWindow: window)
         }
     }
 
     private func resolveCaptureSize(for selection: Selection, filter: SCContentFilter) -> (width: Int, height: Int) {
-        if let preferredPixelSize = captureConfiguration.preferredPixelSize {
-            let preferredArea = max(1.0, preferredPixelSize.width * preferredPixelSize.height)
-            let aspect = max(0.1, captureAspect(for: selection))
-            let width = max(1, Int((preferredArea * aspect).squareRoot().rounded()))
-            let height = max(1, Int((Double(width) / Double(aspect)).rounded()))
-            return (width: width, height: height)
-        }
+        let info = SCShareableContent.info(for: filter)
+        let nativeWidth = max(1, Int(info.contentRect.width * CGFloat(info.pointPixelScale)))
+        let nativeHeight = max(1, Int(info.contentRect.height * CGFloat(info.pointPixelScale)))
 
-        if #available(macOS 14.0, *) {
-            let info = SCShareableContent.info(for: filter)
-            let width = max(1, Int(info.contentRect.width * CGFloat(info.pointPixelScale)))
-            let height = max(1, Int(info.contentRect.height * CGFloat(info.pointPixelScale)))
-            return (width, height)
+        // Keep to the pixel budget, but never capture more pixels than the source has.
+        let budget = captureConfiguration.preferredPixelSize ?? Self.defaultPixelBudget
+        let budgetArea = max(1.0, budget.width * budget.height)
+        guard Double(nativeWidth * nativeHeight) > budgetArea else {
+            return (nativeWidth, nativeHeight)
         }
-
-        switch selection {
-        case .display(let display):
-            return (max(1, display.width * 2), max(1, display.height * 2))
-        case .window(let window):
-            return (max(1, Int(window.frame.width * 2)), max(1, Int(window.frame.height * 2)))
-        }
+        let aspect = max(0.1, captureAspect(for: selection))
+        let width = max(1, Int((budgetArea * aspect).squareRoot().rounded()))
+        let height = max(1, Int((Double(width) / Double(aspect)).rounded()))
+        return (width: width, height: height)
     }
 
     private func captureAspect(for selection: Selection) -> CGFloat {
@@ -327,6 +293,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
         // Idle and blank samples only say the content has not changed.
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        onSourceFrame?()
 
         // Keep to the configured rate on average. Each frame spends one token and tokens refill
         // at the capture rate, so a 60 fps source under a 30 cap keeps every other frame. A
@@ -643,8 +610,8 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         guard now - lastResizeUptime > 0.5 else { return }
         lastResizeUptime = now
 
-        let area = captureConfiguration.preferredPixelSize.map { max(1, $0.width * $0.height) }
-            ?? Double(configuration.width * configuration.height)
+        // The same pixel count in the new shape.
+        let area = Double(configuration.width * configuration.height)
         let width = max(2, Int((area * aspect).squareRoot().rounded()))
         let height = max(2, Int((Double(width) / aspect).rounded()))
         configuration.width = width
@@ -670,7 +637,6 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
     }
 }
 
-@available(macOS 12.3, *)
 extension ScreenCaptureKitCaptureService: SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen else {
@@ -681,7 +647,6 @@ extension ScreenCaptureKitCaptureService: SCStreamOutput {
     }
 }
 
-@available(macOS 12.3, *)
 extension ScreenCaptureKitCaptureService: SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: any Error) {
         onError?(error)

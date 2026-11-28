@@ -22,10 +22,9 @@ final class MainViewController: NSViewController {
 
     private var currentProcessObservation: NSKeyValueObservation?
 
-    private var autoRecoveryAttemptCount = 0
-    private var lastAutoRecoveryTime: CFTimeInterval = 0
-
-    private var captureConfiguration = CaptureConfiguration(framesPerSecond: 60, queueDepth: 5)
+    /// The one capture configuration. Every change goes through `updateCaptureConfiguration`,
+    /// which hands it to the renderer and the capture service and saves it to the profile.
+    private var captureConfiguration = ProfileManager.shared.activeProfile.capture
 
     private var selectedCaptureMode: CaptureModeChoice = .automatic
     private var selectedDisplayIndex: Int = 0
@@ -254,35 +253,8 @@ final class MainViewController: NSViewController {
     }
 
     private func handleRendererError(_ error: Error) {
-        if (error as? CaptureStaleError) == .framesStalled {
-            let now = CACurrentMediaTime()
-            if now - lastAutoRecoveryTime > 10.0 {
-                autoRecoveryAttemptCount = 0
-            }
-            
-            if autoRecoveryAttemptCount < 3 {
-                autoRecoveryAttemptCount += 1
-                lastAutoRecoveryTime = now
-                controlPanel.setStatus("Tracking new window (Fullscreen?)...", isError: false)
-                
-                PipelineLog.shared.event("capture", "auto-recovery \(autoRecoveryAttemptCount)/3 after stalled frames")
-                Task {
-                    await renderer.stop()
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    let target = self.selectedCaptureTarget()
-                    let config = self.captureConfiguration
-                    try? await self.renderer.reconfigureCapture(target: target)
-                    try? await self.renderer.reconfigureCapture(configuration: config)
-                    try? await self.renderer.start()
-                }
-            } else {
-                controlPanel.setStatus("Capture stalled. Please refresh sources or capture Display.", isError: true)
-                overlayController.setCaptureError("Window lost. Check if window is visible.")
-            }
-        } else {
-            controlPanel.setStatus("Error: \(error.localizedDescription)", isError: true)
-            overlayController.setCaptureError(error.localizedDescription)
-        }
+        controlPanel.setStatus("Error: \(error.localizedDescription)", isError: true)
+        overlayController.setCaptureError(error.localizedDescription)
     }
 
     private func handleRendererStats(_ stats: RendererStats) {
@@ -291,9 +263,6 @@ final class MainViewController: NSViewController {
         overlayController.updateStats(stats)
         if stats.isRunning {
             controlPanel.setStatus("Running")
-            if stats.captureFPS > 5.0 {
-                autoRecoveryAttemptCount = 0
-            }
         }
     }
 
@@ -394,6 +363,12 @@ final class MainViewController: NSViewController {
     /// rebuilt for every step of the drag.
     private func updateCaptureConfiguration(_ mutate: (inout CaptureConfiguration) -> Void) {
         mutate(&captureConfiguration)
+        profileManager.updateActiveProfile(capture: captureConfiguration)
+        controlPanel.setProfileEdited(profileManager.isActiveBuiltInEdited)
+        pushCaptureConfiguration()
+    }
+
+    private func pushCaptureConfiguration() {
         captureConfigurationPending = true
         guard captureReconfiguration == nil else { return }
 
@@ -412,6 +387,8 @@ final class MainViewController: NSViewController {
 
     private func updateRenderSettings(syncUI: Bool = false, _ mutate: (inout RenderSettings) -> Void) {
         let updated = settingsStore.update(action: mutate)
+        profileManager.updateActiveProfile(settings: updated)
+        controlPanel.setProfileEdited(profileManager.isActiveBuiltInEdited)
         if syncUI {
             controlPanel.apply(settings: updated, capture: captureConfiguration, profileName: profileManager.activeProfile.name)
         }
@@ -562,6 +539,7 @@ final class MainViewController: NSViewController {
 
     private func applyCaptureConfiguration(_ config: CaptureConfiguration) {
         self.captureConfiguration = config
+        pushCaptureConfiguration()
     }
 
     override var acceptsFirstResponder: Bool {
@@ -623,6 +601,10 @@ extension MainViewController: ControlPanelViewDelegate {
         Task { [weak self] in
             guard let self else { return }
             do {
+                // Wait for any change still on its way, then make sure the stream starts
+                // with what the panel shows.
+                await self.captureReconfiguration?.value
+                try await self.renderer.reconfigureCapture(configuration: self.captureConfiguration)
                 try await self.renderer.reconfigureCapture(target: target)
                 try await self.renderer.start()
                 await MainActor.run {
@@ -790,6 +772,8 @@ extension MainViewController: ControlPanelViewDelegate {
             let capture = max(self.captureConfiguration.framesPerSecond, 1)
             settings.targetPresentationFPS = enabled ? capture * settings.frameGenerationMode.multiplier : capture
         }
+        profileManager.updateActiveProfile(settings: updated)
+        panel.setProfileEdited(profileManager.isActiveBuiltInEdited)
         panel.refreshOutputTarget(captureFPS: captureConfiguration.framesPerSecond, settings: updated)
         panel.setStatus(outputTargetStatus())
     }
@@ -867,10 +851,11 @@ extension MainViewController: ControlPanelViewDelegate {
 extension MainViewController: AddProfileViewControllerDelegate {
     func addProfileViewController(_ vc: AddProfileViewController, didCreateProfileWithName name: String) {
         dismiss(vc)
+        // What is on screen now, including changes made to a built-in profile.
         let new = profileManager.createProfile(
             name: name,
-            settings: profileManager.activeProfile.settings,
-            capture: profileManager.activeProfile.capture
+            settings: settingsStore.snapshot(),
+            capture: captureConfiguration
         )
         profileManager.selectProfile(id: new.id)
         controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
