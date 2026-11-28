@@ -567,8 +567,10 @@ final class MainViewController: NSViewController {
 
     private func presentContentPicker() {
         // Our own windows by number as well: a build run from .build has no bundle identifier.
+        // A window the window server does not know yet has a number that is not an
+        // identifier at all (zero, negative, or too large), so only exact ones count.
         let ownWindows = NSApp.windows.compactMap { window -> CGWindowID? in
-            window.windowNumber > 0 ? CGWindowID(window.windowNumber) : nil
+            window.windowNumber > 0 ? CGWindowID(exactly: window.windowNumber) : nil
         }
         contentPicker.present(excludingWindowIDs: ownWindows)
     }
