@@ -268,7 +268,7 @@ private struct GuideTopic {
             sketch: .capture,
             title: "Capture",
             affects: "Decides the frames everything else works from.",
-            body: "Mode picks a whole display or one window. Capture rate is how many of its frames MetalDuck takes each second. A deeper queue holds a few back, so a hitch in the source does not drop the picture, at the cost of a little delay."
+            body: "Choose opens the macOS picker: click a window, an app or a display, as you would to share it in a meeting. An app means its main window. The Auto, Display and Window lists are the older way in. Capture rate is how many of the source's frames MetalDuck takes each second. A deeper queue holds a few back, so a hitch in the source does not drop the picture, at the cost of a little delay."
         ),
         GuideTopic(
             sketch: .generation,
@@ -280,13 +280,13 @@ private struct GuideTopic {
             sketch: .scaling,
             title: "Scaling",
             affects: "Changes how large and how sharp the picture is drawn.",
-            body: "Fit to output sizes the picture to the output window first. Scale factor then multiplies that size. MetalFX Spatial rebuilds detail; Linear only resamples and costs less. Sharpness runs after the resize."
+            body: "Automatic captures up to about 1920×1080 worth of pixels and scales the picture to the overlay. Manual takes two sizes in pixels. Input is what the source is captured and processed at: lower is faster. Output is what the picture is scaled to. Placement keeps the picture on the source, or shows it centred or across the display, so a small window can be shown large. The picture never takes clicks, so away from the source a click lands on whatever is under the pointer: fine for video and for games that capture the mouse. Aspect decides between bars, cropping and stretching when the shapes differ. MetalFX Spatial rebuilds detail when scaling up; Linear only resamples and costs less. Sharpness runs after the resize."
         ),
         GuideTopic(
             sketch: .resolution,
             title: "Dynamic resolution",
-            affects: "Gives back size when the output cannot keep up.",
-            body: "When drawing falls behind the output rate, the render scale slides down between Minimum and Maximum, then climbs back. The picture gets slightly smaller instead of stuttering."
+            affects: "Gives up capture size when the GPU cannot keep up.",
+            body: "When the GPU runs short of time for a frame, the source is captured a step smaller, down to Minimum, and a step larger again when there is room, up to Maximum. Frame generation works at capture size, so that is where the time comes back. The picture gets a little softer instead of stuttering. It works with Automatic resolution only."
         ),
         GuideTopic(
             sketch: .session,

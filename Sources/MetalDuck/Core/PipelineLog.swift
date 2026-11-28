@@ -299,7 +299,7 @@ final class PipelineLog: @unchecked Sendable {
           flow lag     Captures between the pair being shown and the pair the flow came from. 0 means exact.
           2x / 3x / 4x These do not enqueue that many frames. They only raise the output refresh target to captureFPS × multiplier, capped by the target FPS. Output runs slightly behind capture, and each output frame samples time t between the two buffered captures around that moment.
 
-        The on-screen SOURCE and CAP counters are the same number. This log reports measured capture fps and output fps separately.
+        On screen, SOURCE counts every picture the source sends and CAP counts the ones kept after repeated pictures are skipped and the capture rate is applied. This log reports measured capture fps and output fps separately.
 
 
         """

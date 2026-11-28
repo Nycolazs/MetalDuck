@@ -2,9 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-1.3.2}"
+VERSION="${VERSION:-1.4.0}"
 SDKROOT_PATH="${SDKROOT:-$(xcrun --show-sdk-path 2>/dev/null || echo /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk)}"
+# "-" signs ad hoc, which is fine for a build you run yourself. For a build other people
+# install, set CODESIGN_IDENTITY to a "Developer ID Application: ..." identity and
+# NOTARY_PROFILE to a notarytool keychain profile (see docs/RELEASE.md).
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
 cd "$ROOT_DIR"
 
@@ -85,7 +89,14 @@ touch "$CONTENTS_DIR/PkgInfo"
 echo "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
 # Re-sign the full app bundle after assembling it, so Gatekeeper sees a valid signature.
-codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_DIR"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  echo "warning: signing ad hoc. macOS ties Screen Recording permission to the signature," >&2
+  echo "         so every new build asks for it again, and Gatekeeper warns on other Macs." >&2
+  codesign --force --deep --sign - "$APP_DIR"
+else
+  # Notarization needs the hardened runtime and a secure timestamp.
+  codesign --force --deep --options runtime --timestamp --sign "$CODESIGN_IDENTITY" "$APP_DIR"
+fi
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 # Assemble the DMG stage directory
@@ -183,5 +194,18 @@ hdiutil convert "$TEMP_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH"
 
 echo "Finalizing output..."
 rm -rf "$STAGE_DIR" "$DMG_STAGE_DIR"
+
+if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
+  codesign --force --timestamp --sign "$CODESIGN_IDENTITY" "$DMG_PATH"
+  if [[ -n "$NOTARY_PROFILE" ]]; then
+    echo "Notarizing (this waits for Apple, usually a few minutes)..."
+    xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG_PATH"
+    xcrun stapler validate "$DMG_PATH"
+  else
+    echo "warning: signed but not notarized. Set NOTARY_PROFILE to notarize; without it" >&2
+    echo "         Gatekeeper still warns on other Macs." >&2
+  fi
+fi
 
 echo "Release package created: $DMG_PATH"

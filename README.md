@@ -29,11 +29,14 @@ The overlay follows the source and ignores mouse clicks, so you keep playing or 
 
 ## What you can set
 
-- **Capture.** A whole display or one window, with or without the cursor. Capture rate is the most frames MetalDuck keeps per second. Queue depth is how many the system may hold before they are used.
+- **Source.** **Choose** opens the macOS picker, the one used to share a window in a meeting: click a window, an app, or a display. Picking again while scaling runs switches the source in place. The older Auto, Display, and Window lists are still there.
+- **Capture.** With or without the cursor. Capture rate is the most frames MetalDuck keeps per second. Queue depth is how many the system may hold before they are used.
 - **Frame generation.** Off, 2×, 3×, or 4×. The output rate is the capture rate times that multiplier, so 30 fps at 4× is 120 fps. It does not have a frame rate of its own.
-- **Scaling.** MetalFX Spatial, or a plain resample. Scale factor, fit to the output, sampling, and sharpness.
-- **Dynamic resolution.** Lowers the scale while frames are late and raises it when there is headroom.
-- **Profiles.** Games, Anime, and Video are built in. The `+` button saves the current settings as your own profile.
+- **Scaling.** MetalFX Spatial, or a plain resample, with sampling and sharpness.
+- **Resolution.** Automatic captures up to about 1920×1080 worth of pixels and scales the picture to the overlay. Manual takes an input size and an output size in pixels, an aspect mode (fit, fill, stretch), and a placement.
+- **Placement.** Over the source, centred at the output size, or filling the display, so a small window can be shown large. The overlay never takes clicks, so away from the source a click goes to whatever is under the pointer, not to where the picture shows it. That suits video and games that capture the mouse.
+- **Dynamic resolution.** Captures fewer pixels while the GPU is short of time and more when there is headroom. Automatic resolution only.
+- **Profiles.** Games, Anime, and Video are built in. Changes to your own profiles are saved as you make them. Changes to a built-in profile last until you quit; the `+` button saves what is on screen as your own profile.
 - **Guide.** The book icon in the sidebar explains each control and opens the GitHub repository.
 - **Monitor.** A page inside the main window with live capture, output, and generation numbers, charts, load, and the event log. Click Monitor in the sidebar, then click it again or press Esc to go back.
 
@@ -41,11 +44,11 @@ The overlay follows the source and ignores mouse clicks, so you keep playing or 
 
 1. Open MetalDuck and allow Screen Recording when macOS asks. Without it the capture stays empty.
 2. Pick a profile, or set the controls yourself. For a 24 fps video on a 120 Hz screen, the Anime profile is the starting point: capture capped at 30, generation at 4×.
-3. Choose the window or display.
+3. Press **Choose** and click the window, app, or display to scale. Pressing Start with nothing chosen opens the picker first.
 4. Press **Start**, or use the menu-bar icon. The first start asks you to choose the shortcut that stops scaling. Control-Option-Command-Escape always stops it.
 5. The overlay appears over the source. **Stop** is on the button, in the menu bar, and on the shortcut.
 
-The stats row shows capture fps, output fps, generated fps, and the resolution being drawn.
+The stats row shows capture fps, output fps, generated fps, and the input and output resolution in use.
 
 ## How frame generation works
 
@@ -116,6 +119,7 @@ Compared offline with a frame drawn at the true halfway point, a 40 pixel move s
 
 ```bash
 swift build
+swift test
 .build/debug/MetalDuck
 ```
 
@@ -125,7 +129,7 @@ A release disk image, with the version written into the app:
 bash scripts/create_release.sh
 ```
 
-That writes `dist/MetalDuck-1.3.2.dmg`. Open it and drag MetalDuck to Applications.
+That writes `dist/MetalDuck-<version>.dmg`, signed ad hoc. Signing with a Developer ID and notarizing are covered in [docs/RELEASE.md](docs/RELEASE.md). Open it and drag MetalDuck to Applications.
 
 The current release is on [GitHub Releases](https://github.com/Nycolazs/MetalDuck/releases).
 

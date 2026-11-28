@@ -4,17 +4,37 @@
 
 Checks:
 1. Confirm macOS Screen Recording permission is granted for MetalDuck.
-2. Click `Refresh` and reselect capture source.
-3. If `Window` mode fails for a specific app, try `Display` mode.
-4. Keep source window visible (some apps throttle hidden windows).
+2. Press `Choose` and pick the source again.
+3. If a window will not capture, pick its display instead, or try the `Window` list.
+4. Keep the source window visible (some apps stop drawing when hidden).
+
+## The picture freezes with Centred or Fill display placement
+
+Over the source, the overlay leaves a one-point strip of the window uncovered, because
+some apps (Firefox, for one) stop drawing once macOS reports their window as fully
+hidden. A centred or full-display picture can cover the whole window. If the picture
+freezes, move the source window so part of it shows beside the picture, put it on another
+display, or go back to `Over source`.
+
+## Clicks do not land where the picture shows them
+
+With Centred or Fill display placement the picture is not where the source window is, and
+the picture never takes clicks: they go to whatever is under the pointer. Use `Over
+source` for anything you click on. Video, and games that capture the mouse, are not
+affected.
+
+## The system picker does not list a window
+
+A window that is full screen on another desktop may be missing. Switch to that desktop
+first, or use the `Window` list, which includes full-screen windows.
 
 ## Output FPS lower than source FPS
 
 Checks:
-1. Reduce output size (or disable fullscreen) and compare again.
-2. Try `FG Off` to validate baseline rendering throughput.
-3. If using `FG 3x`, test `FG 2x` first.
-4. Lower scale factor or disable Dynamic Resolution constraints.
+1. Try frame generation off, to see what plain presenting manages.
+2. If using 3× or 4×, test 2× first.
+3. Set Resolution to Manual and lower the input size: frame generation works at that size.
+4. Or turn on Dynamic resolution and lower its Minimum.
 
 ## 30 -> 60 does not happen
 
@@ -35,9 +55,10 @@ Checks:
 ## Capture works but quality looks unchanged
 
 Checks:
-1. Increase output window size or go fullscreen on output window.
-2. Verify `INPUT -> OUTPUT` in HUD shows larger output dimensions.
-3. Compare `Native Linear` vs `MetalFX Spatial` in the same scene.
+1. Check the resolution in the stats row. If input and output are the same, nothing is
+   being scaled: the source is already at the overlay's size.
+2. Set Resolution to Manual with an input smaller than the output.
+3. Compare `Native Linear` and `MetalFX Spatial` in the same scene.
 
 ## DRM / protected content shows black
 

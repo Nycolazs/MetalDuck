@@ -2,6 +2,38 @@
 
 All notable changes to the MetalDuck project will be documented in this file.
 
+## [1.4.0] - unreleased
+
+Not yet run end to end: this version builds and its tests pass, but the picker, the manual resolution controls and the placements still need trying on real windows before release.
+
+### Added
+- **Choose the source in the macOS picker.** The Choose button opens the system's own window, app and display picker. Choosing an app scales its main window. Choosing again while scaling runs switches the source without stopping. Start with nothing chosen opens the picker first, and the last app and window are remembered.
+- **Manual input and output resolution.** Resolution is Automatic or Manual. Manual takes an input size, which the source is captured and processed at, and an output size, which the picture is scaled to, both in pixels, with presets. Aspect chooses between bars, cropping and stretching when the shapes differ.
+- **Placement.** In Manual, the picture can stay over the source, sit centred at the output size, or fill the display, so a small window can be shown large. The overlay still never takes clicks: away from the source they go to whatever is under the pointer.
+- A test target and a CI workflow. `swift test` covers frame timing, the size and placement arithmetic, and how saved settings load.
+
+### Changed
+- **Requires macOS 15.2**, for the picker.
+- Fit to output and Scale factor are gone. With Fit on, as in every built-in profile, the factor did nothing. Saved profiles load as Automatic.
+- Dynamic resolution now follows GPU time and lowers the capture size, where frame generation's cost is. It used to follow the display's own beat, which barely moves, and only shrank the final resize.
+- Capture size, cursor and queue depth change on the running stream instead of restarting it.
+- The app is split into a library and a small executable, and `Present.metal` is bundled as source, so building no longer needs the Metal Toolchain.
+- `scripts/create_release.sh` signs with the hardened runtime and notarizes when given a Developer ID and a notary profile.
+
+### Fixed
+- **A profile's capture settings did not reach the stream.** The capture rate, queue depth and cursor setting only took effect after one of those controls was moved, and the capture size changed when one was. There is now one capture configuration, applied whenever a profile is picked and before each start.
+- **Setting changes were not saved.** Changes to your own profiles are now saved as you make them. A changed built-in profile is marked, and `+` saves what is on screen.
+- **Refresh changed the selected window.** The lists keep the selection by identifier and no longer jump to a browser window.
+- **A pointless resample on every frame.** At the source's own size the picture went through the scaler to lose a few pixels. A target within 1% of the input now skips it.
+- **The picture drifted from a window at the screen's edge.** A window partly off screen or under the Dock was squeezed into the part that showed. The overlay now shows exactly the part it covers.
+- The Source row of the stats overlay now shows what the source sends, before repeats are skipped and the cap is applied, so its throttling hint can appear.
+- A small source is no longer captured at more pixels than it has.
+
+### Removed
+- "MetalFX Temporal", which always ran the spatial scaler. Saved profiles load it as Spatial.
+- The Accessibility permission prompt at launch. Nothing used it.
+- The stall recovery that could never run, the Core Graphics window list, code paths for macOS 14 and earlier, and the cut-down fallback shader. A missing shader file now fails at launch with a message.
+
 ## [1.3.2] - 2026-11-21
 
 Bug fixes for frame generation on full-screen video, found while watching films, trailers and anime with the Anime profile (30 fps capture, 4x, 120 Hz).

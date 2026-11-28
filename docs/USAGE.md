@@ -6,7 +6,7 @@ Short version:
 
 1. Launch MetalDuck and allow Screen Recording.
 2. Pick a profile, or set capture, frame generation, and scaling yourself.
-3. Choose a display or a window.
+3. Press Choose and click a window, an app, or a display in the macOS picker.
 4. Press Start. The overlay follows the source and ignores clicks.
 5. Stop from the button, the menu-bar icon, or the stop shortcut. Control-Option-Command-Escape always stops it.
 
