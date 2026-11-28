@@ -25,6 +25,30 @@ enum AspectMode: String, Codable, Equatable, CaseIterable, Sendable {
     case stretch = "Stretch"
 }
 
+/// Where the scaled picture goes on screen.
+enum OutputPlacement: String, Codable, Equatable, CaseIterable, Sendable {
+    /// Exactly over the source, following it. Clicks land where the picture shows them.
+    case overSource = "Over source"
+    /// The output size, centred on the source's screen.
+    case centered = "Centred"
+    /// The whole screen the source is on.
+    case fillDisplay = "Fill display"
+}
+
+/// Where the overlay sits, and which part of the source's picture it shows.
+struct OverlayPlan: Equatable {
+    /// In Cocoa screen coordinates (points, origin bottom left).
+    var frame: CGRect
+    /// The overlay covers a whole screen: it sits under the Dock and menu bar and joins
+    /// the source's Space.
+    var fillsScreen: Bool
+    /// The part of the source's picture the overlay shows, as a share of it, origin top
+    /// left. The whole picture is (0, 0, 1, 1).
+    var sourceCrop: CGRect
+
+    static let wholePicture = CGRect(x: 0, y: 0, width: 1, height: 1)
+}
+
 /// The sizes the pipeline works at. Pure arithmetic, kept apart from Metal and AppKit so
 /// it can be tested: the capture stream's size, the size the scaler renders to, and how
 /// that picture sits in the drawable.
@@ -129,6 +153,92 @@ enum ScalePlan {
         case .fit:
             return ratio > 1 ? (1, 1 / ratio) : (ratio, 1)
         }
+    }
+
+    /// Where the overlay goes. All rectangles are Cocoa screen coordinates in points.
+    ///
+    /// Over the source, the overlay is the part of the source that is on screen, less a
+    /// strip one point high at the bottom: macOS tells an app its window is hidden only
+    /// when none of it shows, and browsers stop drawing then, which froze the very video
+    /// being scaled. `sourceCrop` says which part of the picture that is, so the picture
+    /// stays lined up with the window under it.
+    static func overlayPlan(
+        source: CGRect,
+        screenFrame: CGRect,
+        visibleFrame: CGRect,
+        backingScale: CGFloat,
+        output: PixelSize?,
+        placement: OutputPlacement
+    ) -> OverlayPlan {
+        switch placement {
+        case .fillDisplay:
+            return OverlayPlan(frame: screenFrame, fillsScreen: true, sourceCrop: OverlayPlan.wholePicture)
+
+        case .centered:
+            let scale = max(backingScale, 1)
+            var size = output.map { CGSize(width: CGFloat($0.width) / scale, height: CGFloat($0.height) / scale) }
+                ?? source.size
+            size.width = max(1, size.width)
+            size.height = max(1, size.height)
+            // Too large for the screen: shrink it, keeping its shape.
+            let fit = min(1, screenFrame.width / size.width, screenFrame.height / size.height)
+            size = CGSize(width: (size.width * fit).rounded(), height: (size.height * fit).rounded())
+            if size.width >= screenFrame.width - 1, size.height >= screenFrame.height - 1 {
+                return OverlayPlan(frame: screenFrame, fillsScreen: true, sourceCrop: OverlayPlan.wholePicture)
+            }
+            // Keep the menu bar and Dock clear when it fits between them.
+            let area = size.width <= visibleFrame.width && size.height <= visibleFrame.height ? visibleFrame : screenFrame
+            let frame = CGRect(
+                x: (area.midX - size.width / 2).rounded(),
+                y: (area.midY - size.height / 2).rounded(),
+                width: size.width,
+                height: size.height
+            )
+            return OverlayPlan(frame: frame, fillsScreen: false, sourceCrop: OverlayPlan.wholePicture)
+
+        case .overSource:
+            let fillsScreen = fills(source, screen: screenFrame)
+            // A full-screen source is covered as it is. Anything else stays inside the
+            // visible area, so the menu bar and Dock (and Force Quit) stay reachable.
+            var frame = fillsScreen ? source : source.intersection(visibleFrame)
+            if frame.isNull || frame.width < 1 || frame.height < 1 {
+                frame = CGRect(x: source.minX, y: source.minY, width: max(1, source.width), height: max(1, source.height))
+            }
+            if frame.height > 2 {
+                frame.origin.y += 1
+                frame.size.height -= 1
+            }
+            guard source.width > 0, source.height > 0 else {
+                return OverlayPlan(frame: frame, fillsScreen: fillsScreen, sourceCrop: OverlayPlan.wholePicture)
+            }
+            let crop = CGRect(
+                x: (frame.minX - source.minX) / source.width,
+                y: (source.maxY - frame.maxY) / source.height,
+                width: frame.width / source.width,
+                height: frame.height / source.height
+            )
+            return OverlayPlan(frame: frame, fillsScreen: fillsScreen, sourceCrop: crop)
+        }
+    }
+
+    /// True when `rect` fills `screen`: full width, down to the bottom, and up to the top
+    /// or to just under the notch strip. Apps stop at different heights there (Firefox
+    /// leaves the menu bar's 37 pt, the notch itself is 32 pt), so allow up to 60 pt,
+    /// which no ordinary window that fills the width reaches by accident.
+    static func fills(_ rect: CGRect, screen: CGRect) -> Bool {
+        let topGap = screen.maxY - rect.maxY
+        return abs(rect.minX - screen.minX) <= 2 && abs(rect.width - screen.width) <= 4 &&
+            abs(rect.minY - screen.minY) <= 2 && topGap >= -2 && topGap <= 60
+    }
+
+    /// The drawable the whole picture would need, when the overlay shows only `crop` of
+    /// it: the render size is planned against this, so the visible part is not rendered
+    /// smaller than the screen pixels it covers.
+    static func drawable(_ drawable: PixelSize, showing crop: CGRect) -> PixelSize {
+        PixelSize(
+            width: rounded(Double(drawable.width) / Double(min(max(crop.width, 0.01), 1))),
+            height: rounded(Double(drawable.height) / Double(min(max(crop.height, 0.01), 1)))
+        )
     }
 
     private static func isNearly(_ a: Int, _ b: Int) -> Bool {

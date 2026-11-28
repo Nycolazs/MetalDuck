@@ -70,6 +70,8 @@ struct RenderSettings: Codable, Equatable {
     var outputResolution: PixelSize
     /// Manual only. Automatic always fills.
     var aspectMode: AspectMode
+    /// Manual only. Automatic stays over the source.
+    var outputPlacement: OutputPlacement
     var samplingMode: SamplingMode
     var sharpness: Float
     /// Automatic only: lower the capture size while the GPU is short of time.
@@ -88,6 +90,7 @@ struct RenderSettings: Codable, Equatable {
         inputResolution: PixelSize = PixelSize(width: 1280, height: 720),
         outputResolution: PixelSize = PixelSize(width: 2560, height: 1440),
         aspectMode: AspectMode = .fit,
+        outputPlacement: OutputPlacement = .overSource,
         samplingMode: SamplingMode = .linear,
         sharpness: Float = 0.75,
         dynamicResolutionEnabled: Bool = false,
@@ -103,6 +106,7 @@ struct RenderSettings: Codable, Equatable {
         self.inputResolution = inputResolution
         self.outputResolution = outputResolution
         self.aspectMode = aspectMode
+        self.outputPlacement = outputPlacement
         self.samplingMode = samplingMode
         self.sharpness = sharpness
         self.dynamicResolutionEnabled = dynamicResolutionEnabled
@@ -120,11 +124,14 @@ struct RenderSettings: Codable, Equatable {
     var requestedOutput: PixelSize? { manualResolution ? outputResolution : nil }
     /// Automatic fills the overlay, as it always has.
     var effectiveAspectMode: AspectMode { manualResolution ? aspectMode : .fill }
+    /// Automatic keeps the overlay on the source.
+    var effectivePlacement: OutputPlacement { manualResolution ? outputPlacement : .overSource }
     /// Dynamic resolution only acts in Automatic: Manual sizes are the user's to keep.
     var dynamicResolutionActive: Bool { dynamicResolutionEnabled && !manualResolution }
 
     private enum CodingKeys: String, CodingKey {
         case upscalingAlgorithm, manualResolution, inputResolution, outputResolution, aspectMode
+        case outputPlacement
         case samplingMode, sharpness
         case dynamicResolutionEnabled, dynamicScaleMinimum, dynamicScaleMaximum
         case targetPresentationFPS, frameGenerationEnabled, frameGenerationMode, artifactGuard
@@ -141,6 +148,7 @@ struct RenderSettings: Codable, Equatable {
         inputResolution = try container.decodeIfPresent(PixelSize.self, forKey: .inputResolution) ?? defaults.inputResolution
         outputResolution = try container.decodeIfPresent(PixelSize.self, forKey: .outputResolution) ?? defaults.outputResolution
         aspectMode = try container.decodeIfPresent(AspectMode.self, forKey: .aspectMode) ?? defaults.aspectMode
+        outputPlacement = try container.decodeIfPresent(OutputPlacement.self, forKey: .outputPlacement) ?? defaults.outputPlacement
         samplingMode = try container.decode(SamplingMode.self, forKey: .samplingMode)
         sharpness = try container.decode(Float.self, forKey: .sharpness)
         dynamicResolutionEnabled = try container.decode(Bool.self, forKey: .dynamicResolutionEnabled)

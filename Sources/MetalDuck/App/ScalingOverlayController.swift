@@ -59,60 +59,67 @@ final class ScalingOverlayController {
         setJoinsFullScreenSpaces(false)
     }
 
-    func updateFrame(to rect: CGRect) {
+    /// Called on the main thread when the part of the source's picture the overlay shows
+    /// changes (see `OverlayPlan.sourceCrop`).
+    var onSourceCrop: ((CGRect) -> Void)?
+    private var lastSourceCrop = OverlayPlan.wholePicture
+
+    /// Places the overlay for a source at `rect` (global points, origin top left).
+    func updateFrame(to rect: CGRect, placement: OutputPlacement, output: PixelSize?) {
         // Run on next runloop to allow window constraints to settle if it just appeared
         DispatchQueue.main.async {
-            var cocoaRect = rect
+            var source = rect
             if let primaryScreen = NSScreen.screens.first {
-                cocoaRect.origin.y = primaryScreen.frame.height - rect.maxY
+                source.origin.y = primaryScreen.frame.height - rect.maxY
             }
             // Add a small safety to prevent impossible sizing from causing errors
-            cocoaRect.size.width = max(1.0, cocoaRect.size.width)
-            cocoaRect.size.height = max(1.0, cocoaRect.size.height)
+            source.size.width = max(1.0, source.size.width)
+            source.size.height = max(1.0, source.size.height)
 
-            // A full-screen source fills the display (below the notch on MacBooks with one).
-            // Cover exactly what it covers, and sit under the Dock and menu bar so they
-            // still slide in over the picture.
-            let fullScreen = NSScreen.screens.contains { Self.isFullScreen(cocoaRect, on: $0) }
-            let level: NSWindow.Level
-            if fullScreen {
-                level = Self.underDockAndMenus
-            } else {
-                if let screen = self.currentScreen ?? self.outputWindow?.screen {
-                    cocoaRect = Self.clampedToVisibleFrame(cocoaRect, on: screen)
-                }
-                level = Self.belowMenus
-            }
-            // Leave one point of the source uncovered. macOS tells an app its window is
-            // hidden only when none of it shows, and browsers like Firefox stop drawing then,
-            // which froze the very video being scaled. One point keeps it "visible".
-            if cocoaRect.height > 2 {
-                cocoaRect.origin.y += 1
-                cocoaRect.size.height -= 1
-            }
-            guard let window = self.outputWindow else { return }
+            guard let window = self.outputWindow,
+                  let screen = Self.screen(containing: source) ?? self.currentScreen ?? window.screen else { return }
+            let plan = ScalePlan.overlayPlan(
+                source: source,
+                screenFrame: screen.frame,
+                visibleFrame: screen.visibleFrame,
+                backingScale: screen.backingScaleFactor,
+                output: output,
+                placement: placement
+            )
+
+            // A picture that fills the screen sits under the Dock and menu bar, so they
+            // still slide in over it. Otherwise it stays just under popup menus.
+            let level = plan.fillsScreen ? Self.underDockAndMenus : Self.belowMenus
             if window.level != level {
                 window.level = level
-                self.setJoinsFullScreenSpaces(fullScreen)
-                PipelineLog.shared.event("capture", fullScreen
-                    ? "source is full screen: overlay joins its Space and covers it, under the Dock and menu bar"
-                    : "source left full screen: overlay back above ordinary windows")
+                self.setJoinsFullScreenSpaces(plan.fillsScreen)
+                PipelineLog.shared.event("capture", plan.fillsScreen
+                    ? "picture fills the screen: overlay joins the Space and covers it, under the Dock and menu bar"
+                    : "picture no longer fills the screen: overlay back above ordinary windows")
             }
-            if window.frame != cocoaRect {
-                window.setFrame(cocoaRect, display: true, animate: false)
+            if window.frame != plan.frame {
+                window.setFrame(plan.frame, display: true, animate: false)
+            }
+            if plan.sourceCrop != self.lastSourceCrop {
+                self.lastSourceCrop = plan.sourceCrop
+                self.onSourceCrop?(plan.sourceCrop)
             }
         }
     }
 
-    /// True when `rect` (Cocoa coordinates) fills `screen`: full width, down to the bottom,
-    /// and up to the top or to just under the notch strip. Apps stop at different heights
-    /// there (Firefox leaves the menu bar's 37 pt, the notch itself is 32 pt), so allow up
-    /// to 60 pt, which no ordinary window that fills the width reaches by accident.
-    private static func isFullScreen(_ rect: CGRect, on screen: NSScreen) -> Bool {
-        let frame = screen.frame
-        let topGap = frame.maxY - rect.maxY
-        return abs(rect.minX - frame.minX) <= 2 && abs(rect.width - frame.width) <= 4 &&
-            abs(rect.minY - frame.minY) <= 2 && topGap >= -2 && topGap <= 60
+    /// The screen showing most of `rect` (Cocoa coordinates).
+    private static func screen(containing rect: CGRect) -> NSScreen? {
+        var best: NSScreen?
+        var bestArea: CGFloat = 0
+        for screen in NSScreen.screens {
+            let overlap = screen.frame.intersection(rect)
+            let area = overlap.isNull ? 0 : overlap.width * overlap.height
+            if area > bestArea {
+                bestArea = area
+                best = screen
+            }
+        }
+        return best
     }
 
     /// macOS only lets another app's window into a full-screen Space when that app runs
@@ -134,29 +141,6 @@ final class ScalingOverlayController {
     /// Over a full-screen app's window, but under the Dock (20) and the menu bar (24),
     /// which macOS slides in over a full-screen Space.
     static let underDockAndMenus = NSWindow.Level(rawValue: 19)
-
-    /// Keeps the menu bar and Dock outside the picture, so Force Quit stays reachable.
-    private static func clampedToVisibleFrame(_ rect: CGRect, on screen: NSScreen) -> CGRect {
-        let visible = screen.visibleFrame
-        var clamped = rect
-        if clamped.minX < visible.minX {
-            clamped.size.width -= visible.minX - clamped.minX
-            clamped.origin.x = visible.minX
-        }
-        if clamped.maxX > visible.maxX {
-            clamped.size.width -= clamped.maxX - visible.maxX
-        }
-        if clamped.minY < visible.minY {
-            clamped.size.height -= visible.minY - clamped.minY
-            clamped.origin.y = visible.minY
-        }
-        if clamped.maxY > visible.maxY {
-            clamped.size.height -= clamped.maxY - visible.maxY
-        }
-        clamped.size.width = max(1, clamped.size.width)
-        clamped.size.height = max(1, clamped.size.height)
-        return clamped
-    }
 
     func updateStats(_ stats: RendererStats) {
         outputViewController.updateStats(stats)

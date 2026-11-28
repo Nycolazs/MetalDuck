@@ -6,6 +6,9 @@ struct PresentUniforms {
     float2 texelSize;
     float sharpness;
     float blendFactor;
+    // The part of the picture to show, as a share of it.
+    float2 uvOrigin;
+    float2 uvSize;
 };
 
 struct VertexOut {
@@ -49,7 +52,7 @@ fragment float4 fragmentPresent(
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
-    float2 uv = saturate(in.uv);
+    float2 uv = uniforms.uvOrigin + saturate(in.uv) * uniforms.uvSize;
 
     float blendFactor = saturate(uniforms.blendFactor);
     float3 centerA = sourceTextureA.sample(sourceSampler, uv).rgb;

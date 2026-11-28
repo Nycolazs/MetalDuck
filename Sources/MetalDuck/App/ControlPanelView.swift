@@ -54,6 +54,7 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanel(_ panel: ControlPanelView, didChangeInputResolution size: PixelSize)
     func controlPanel(_ panel: ControlPanelView, didChangeOutputResolution size: PixelSize)
     func controlPanel(_ panel: ControlPanelView, didChangeAspectMode mode: AspectMode)
+    func controlPanel(_ panel: ControlPanelView, didChangeOutputPlacement placement: OutputPlacement)
     func controlPanel(_ panel: ControlPanelView, didChangeSamplingMode mode: SamplingMode)
     func controlPanel(_ panel: ControlPanelView, didChangeSharpness value: Float)
 
@@ -132,6 +133,7 @@ final class ControlPanelView: NSView {
     private let inputResolutionField = ResolutionField(size: PixelSize(width: 1280, height: 720), accessibilityName: "Input")
     private let outputResolutionField = ResolutionField(size: PixelSize(width: 2560, height: 1440), accessibilityName: "Output")
     private let aspectControl = GlassSegmented.make(AspectMode.allCases.map(\.rawValue))
+    private let placementControl = GlassSegmented.make(["Source", "Centred", "Fill"])
     private let samplingControl = GlassSegmented.make(SamplingMode.allCases.map(\.rawValue))
     private let sharpnessSlider = NSSlider(value: 0.0, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let sharpnessValueLabel = NSTextField(labelWithString: "0.00")
@@ -214,6 +216,7 @@ final class ControlPanelView: NSView {
         inputResolutionField.size = settings.inputResolution
         outputResolutionField.size = settings.outputResolution
         aspectControl.selectedSegment = AspectMode.allCases.firstIndex(of: settings.aspectMode) ?? 0
+        placementControl.selectedSegment = OutputPlacement.allCases.firstIndex(of: settings.outputPlacement) ?? 0
         samplingControl.selectedSegment = SamplingMode.allCases.firstIndex(of: settings.samplingMode) ?? 0
         sharpnessSlider.floatValue = settings.sharpness
         GlassMotion.crossfade(sharpnessValueLabel, to: String(format: "%.2f", settings.sharpness))
@@ -478,6 +481,8 @@ final class ControlPanelView: NSView {
         resolutionModeControl.action = #selector(handleResolutionModeChanged)
         aspectControl.target = self
         aspectControl.action = #selector(handleAspectModeChanged)
+        placementControl.target = self
+        placementControl.action = #selector(handlePlacementChanged)
         inputResolutionField.onCommit = { [weak self] size in
             guard let self, !self.isApplyingValues else { return }
             self.refreshSummary()
@@ -489,7 +494,7 @@ final class ControlPanelView: NSView {
             self.delegate?.controlPanel(self, didChangeOutputResolution: size)
         }
 
-        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown, resolutionModeControl, aspectControl] as [NSView] {
+        for control in [frameGenerationControl, artifactGuardControl, samplingControl, upscalerDropdown, resolutionModeControl, aspectControl, placementControl] as [NSView] {
             control.widthAnchor.constraint(equalToConstant: GlassMetrics.controlWidth).isActive = true
         }
 
@@ -1043,6 +1048,7 @@ final class ControlPanelView: NSView {
         group.addRow(SettingRow.control("Resolution", symbol: "aspectratio", help: "Automatic captures up to about 1920×1080 worth of pixels and scales the picture to the overlay. Manual uses the two sizes below.", control: resolutionModeControl))
         group.addRow(SettingRow.control("Input", symbol: "arrow.down.right.and.arrow.up.left", help: "The size the source is captured and processed at, in pixels. The source keeps its shape and fits inside this size. It is never captured larger than it is. Lower is faster.", control: inputResolutionField))
         group.addRow(SettingRow.control("Output", symbol: "arrow.up.left.and.arrow.down.right", help: "The size the picture is scaled to, in pixels. It is held to the overlay's own size, since pixels past that are thrown away.", control: outputResolutionField))
+        group.addRow(SettingRow.control("Placement", symbol: "rectangle.inset.filled", help: "Over source keeps the picture exactly on the source window. Centred shows it at the output size in the middle of the screen, and Fill display covers the screen: use these to show a small window large. The picture never takes clicks, so away from the source a click goes to whatever is under the pointer, not to where the picture shows it. That suits video and games that capture the mouse.", control: placementControl))
         group.addRow(SettingRow.control("Aspect", symbol: "rectangle.dashed", help: "When the output's shape differs from the source's: Fit shows everything with bars, Fill crops, Stretch distorts.", control: aspectControl))
         group.addRow(SettingRow.control("Sampling", symbol: "square.grid.3x3", help: "Filter used for native resampling.", control: samplingControl))
         group.addRow(SettingRow.slider("Sharpness", symbol: "circle.lefthalf.filled", help: "Post-process sharpening strength.", slider: sharpnessSlider, value: sharpnessValueLabel))
@@ -1177,6 +1183,7 @@ final class ControlPanelView: NSView {
         inputResolutionField.isEnabled = manual
         outputResolutionField.isEnabled = manual
         aspectControl.isEnabled = manual
+        placementControl.isEnabled = manual
         // Dynamic resolution changes the capture size itself, which Manual fixes.
         dynamicResolutionSwitch.isEnabled = !manual
         let dynamicEnabled = dynamicResolutionSwitch.isOn && !manual
@@ -1310,6 +1317,14 @@ final class ControlPanelView: NSView {
         syncDependentControls()
         refreshSummary()
         delegate?.controlPanel(self, didChangeManualResolution: resolutionModeControl.selectedSegment == 1)
+    }
+
+    @objc private func handlePlacementChanged() {
+        guard !isApplyingValues else { return }
+        let placements = OutputPlacement.allCases
+        let index = placementControl.selectedSegment
+        guard placements.indices.contains(index) else { return }
+        delegate?.controlPanel(self, didChangeOutputPlacement: placements[index])
     }
 
     @objc private func handleAspectModeChanged() {

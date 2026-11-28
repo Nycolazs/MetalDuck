@@ -247,8 +247,20 @@ final class MainViewController: NSViewController {
             }
         }
         
+        // Called on the capture queue with every frame. The settings store is safe to
+        // read from there; the overlay does its work on the main thread.
         renderer.onGeometryUpdate = { [weak self] rect in
-            self?.overlayController.updateFrame(to: rect)
+            guard let self else { return }
+            let settings = self.settingsStore.snapshot()
+            let overlay = UncheckedSendable(self.overlayController)
+            let placement = settings.effectivePlacement
+            let output = settings.requestedOutput
+            DispatchQueue.main.async {
+                overlay.value.updateFrame(to: rect, placement: placement, output: output)
+            }
+        }
+        overlayController.onSourceCrop = { [weak self] crop in
+            self?.renderer.setSourceCrop(crop)
         }
         
         renderer.onError = { [weak self] error in
@@ -823,6 +835,17 @@ extension MainViewController: ControlPanelViewDelegate {
             settings.outputResolution = size
         }
         panel.setStatus("Output resolution: \(size.description)")
+    }
+
+    func controlPanel(_ panel: ControlPanelView, didChangeOutputPlacement placement: OutputPlacement) {
+        updateRenderSettings { settings in
+            settings.outputPlacement = placement
+        }
+        // The overlay ignores clicks, so they go to whatever is under the pointer. Away
+        // from the source that is no longer the spot the picture shows.
+        panel.setStatus(placement == .overSource
+            ? "Placement: over the source"
+            : "Placement: \(placement.rawValue). Clicks still go to what is under the pointer, not to where the picture shows it.")
     }
 
     func controlPanel(_ panel: ControlPanelView, didChangeAspectMode mode: AspectMode) {

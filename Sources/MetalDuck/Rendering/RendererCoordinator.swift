@@ -10,6 +10,9 @@ private struct PresentUniforms {
     var texelSize: SIMD2<Float>
     var sharpness: Float
     var blendFactor: Float
+    /// The part of the picture to show, as a share of it: origin and size.
+    var uvOrigin: SIMD2<Float> = SIMD2<Float>(0, 0)
+    var uvSize: SIMD2<Float> = SIMD2<Float>(1, 1)
 }
 
 struct RendererStats {
@@ -130,6 +133,8 @@ final class RendererCoordinator: NSObject {
     private var library: MTLLibrary
 
     private var running = false
+    /// The part of the source's picture the overlay shows (`OverlayPlan.sourceCrop`).
+    private var sourceCrop = OverlayPlan.wholePicture
     /// Dynamic resolution: the share of its usual size each side is captured at, when it
     /// last moved, and a running average of the GPU time one drawn frame takes.
     private var dynamicInputScale: Double = 1.0
@@ -174,6 +179,12 @@ final class RendererCoordinator: NSObject {
 
     var isRunning: Bool {
         running
+    }
+
+    /// The overlay shows only this part of the source's picture: the source is partly
+    /// off screen, or the overlay leaves a strip of it uncovered.
+    func setSourceCrop(_ crop: CGRect) {
+        renderLock.withLock { sourceCrop = crop }
     }
 
     var currentCaptureConfiguration: CaptureConfiguration {
@@ -1110,10 +1121,12 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
         let drawablePixels = PixelSize(width: drawable.texture.width, height: drawable.texture.height)
         let inputPixels = PixelSize(width: presentation.primary.width, height: presentation.primary.height)
         let aspectMode = settings.effectiveAspectMode
+        // Over the source the overlay may show only part of the picture; elsewhere all of it.
+        let crop = settings.effectivePlacement == .overSource ? sourceCrop : OverlayPlan.wholePicture
         let target = ScalePlan.renderSize(
             input: inputPixels,
             requested: settings.requestedOutput,
-            drawable: drawablePixels,
+            drawable: ScalePlan.drawable(drawablePixels, showing: crop),
             aspect: aspectMode
         )
         lastEffectiveScale = Float(target.width) / Float(max(inputPixels.width, 1))
@@ -1162,8 +1175,12 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
         encoder.setRenderPipelineState(renderPipelineState)
         lastOutputTexture = finalPrimary
 
+        // The shape of the part that is shown, not of the whole texture.
         let presentScale = ScalePlan.presentScale(
-            picture: PixelSize(width: finalPrimary.width, height: finalPrimary.height),
+            picture: PixelSize(
+                width: max(1, Int((CGFloat(finalPrimary.width) * crop.width).rounded())),
+                height: max(1, Int((CGFloat(finalPrimary.height) * crop.height).rounded()))
+            ),
             drawable: drawablePixels,
             aspect: aspectMode
         )
@@ -1174,7 +1191,9 @@ extension RendererCoordinator: CAMetalDisplayLinkDelegate {
                 1.0 / Float(max(1, finalPrimary.height))
             ),
             sharpness: max(0.0, min(settings.sharpness, 1.0)),
-            blendFactor: presentation.blendFactor
+            blendFactor: presentation.blendFactor,
+            uvOrigin: SIMD2<Float>(Float(crop.minX), Float(crop.minY)),
+            uvSize: SIMD2<Float>(Float(crop.width), Float(crop.height))
         )
 
         encoder.setVertexBytes(&uniforms, length: MemoryLayout<PresentUniforms>.stride, index: 0)
