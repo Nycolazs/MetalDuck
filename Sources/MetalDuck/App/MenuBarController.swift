@@ -7,6 +7,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     var onStart: (() -> Void)?
     var onStop: (() -> Void)?
     var onShowWindow: (() -> Void)?
+    var onChooseSource: (() -> Void)?
     var onQuit: (() -> Void)?
 
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -84,6 +85,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(shortcut)
         menu.addItem(.separator())
 
+        let choose = NSMenuItem(title: "Choose Source…", action: #selector(handleChooseSource), keyEquivalent: "")
+        choose.target = self
+        choose.image = symbol("macwindow.badge.plus")
+        menu.addItem(choose)
+
         let show = NSMenuItem(title: "Show Window", action: #selector(handleShowWindow), keyEquivalent: "")
         show.target = self
         menu.addItem(show)
@@ -112,6 +118,10 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func handleStart() {
         onStart?()
+    }
+
+    @objc private func handleChooseSource() {
+        onChooseSource?()
     }
 
     @objc private func handleShowWindow() {

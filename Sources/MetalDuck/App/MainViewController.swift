@@ -2,6 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 import MetalKit
+@preconcurrency import ScreenCaptureKit
 
 @MainActor
 final class MainViewController: NSViewController {
@@ -11,6 +12,8 @@ final class MainViewController: NSViewController {
     }
 
     private static let showHUDKey = "com.metalduck.showHUD"
+    private static let lastSourceBundleKey = "com.metalduck.lastSourceBundleID"
+    private static let lastSourceTitleKey = "com.metalduck.lastSourceWindowTitle"
 
     private let controlPanel = ControlPanelView(frame: .zero)
     private let renderer: RendererCoordinator
@@ -19,6 +22,11 @@ final class MainViewController: NSViewController {
     private let overlayController: ScalingOverlayController
     private let menuBar = MenuBarController()
     private let outsideClickDismisser = OutsideClickDismisser()
+    private let contentPicker = ContentPicker()
+    /// What was chosen in the system picker.
+    private var pickedContent: PickedContent?
+    /// Start was pressed with nothing chosen: start once the picker returns.
+    private var startsAfterPick = false
 
     private var currentProcessObservation: NSKeyValueObservation?
 
@@ -26,12 +34,16 @@ final class MainViewController: NSViewController {
     /// which hands it to the renderer and the capture service and saves it to the profile.
     private var captureConfiguration = ProfileManager.shared.activeProfile.capture
 
-    private var selectedCaptureMode: CaptureModeChoice = .automatic
+    private var selectedCaptureMode: CaptureModeChoice = .picked
     private var selectedDisplayIndex: Int = 0
     private var selectedWindowIndex: Int = 0
+    /// The lists are re-sorted on every refresh, so the selection is kept by identifier.
+    private var selectedDisplayID: CGDirectDisplayID?
+    private var selectedWindowID: CGWindowID?
 
     private var displayEntries: [CaptureEntry] = []
     private var windowEntries: [CaptureEntry] = []
+    private var windowSources: [CaptureWindowSource] = []
     private var lastStatsUpdateTime: CFTimeInterval?
     private var captureReconfiguration: Task<Void, Never>?
     private var captureConfigurationPending = false
@@ -56,17 +68,9 @@ final class MainViewController: NSViewController {
 
         super.init(nibName: nil, bundle: nil)
 
-        switch initialTarget {
-        case .automatic:
-            selectedCaptureMode = .automatic
-        case .display:
-            selectedCaptureMode = .display
-        case .window:
-            selectedCaptureMode = .window
-        }
-
         controlPanel.delegate = self
         wireRendererCallbacks()
+        wireContentPicker()
     }
 
     @available(*, unavailable)
@@ -97,7 +101,9 @@ final class MainViewController: NSViewController {
 
     func start() async {
         await refreshCaptureSources()
+        restoreLastPickedSource()
         controlPanel.setCaptureMode(selectedCaptureMode)
+        controlPanel.setPickedSource(pickedContent?.title)
         applyCaptureTargetSelection()
         
         controlPanel.setProfiles(profileManager.profiles, activeId: profileManager.activeProfileId)
@@ -129,6 +135,7 @@ final class MainViewController: NSViewController {
         }
         selectedCaptureMode = .window
         selectedWindowIndex = index
+        selectedWindowID = windowSources[index].windowID
         controlPanel.setCaptureMode(.window)
         applyCaptureModeToPicker()
         controlPanelDidPressStart(controlPanel)
@@ -164,6 +171,9 @@ final class MainViewController: NSViewController {
             guard let self else { return }
             PipelineLog.shared.event("session", "stop from the menu bar")
             self.controlPanelDidPressStop(self.controlPanel)
+        }
+        menuBar.onChooseSource = { [weak self] in
+            self?.presentContentPicker()
         }
         menuBar.onShowWindow = { [weak self] in
             guard let window = self?.view.window else { return }
@@ -282,22 +292,19 @@ final class MainViewController: NSViewController {
         displayEntries = catalog.displays.map { source in
             CaptureEntry(title: source.title, target: .display(source.displayID))
         }
-
+        windowSources = catalog.windows
         windowEntries = catalog.windows.map { source in
             CaptureEntry(title: source.title, target: .window(source.windowID))
         }
 
-        if selectedCaptureMode == .window,
-           !windowEntries.isEmpty {
-            let browserHints = ["Firefox", "Google Chrome", "Safari", "Brave", "Arc"]
-            if let browserIndex = windowEntries.firstIndex(where: { entry in
-                browserHints.contains(where: { entry.title.localizedCaseInsensitiveContains($0) })
-            }) {
-                selectedWindowIndex = browserIndex
-            } else {
-                selectedWindowIndex = min(selectedWindowIndex, windowEntries.count - 1)
-            }
-        }
+        // The lists come back in a new order. Find the chosen entries again by identifier;
+        // one that is gone falls back to the first entry.
+        selectedDisplayIndex = catalog.displays.firstIndex { $0.displayID == selectedDisplayID } ?? 0
+        selectedWindowIndex = catalog.windows.firstIndex { $0.windowID == selectedWindowID } ?? 0
+        selectedDisplayID = catalog.displays.indices.contains(selectedDisplayIndex)
+            ? catalog.displays[selectedDisplayIndex].displayID : nil
+        selectedWindowID = catalog.windows.indices.contains(selectedWindowIndex)
+            ? catalog.windows[selectedWindowIndex].windowID : nil
 
         applyCaptureModeToPicker()
         applyCaptureTargetSelection()
@@ -306,6 +313,9 @@ final class MainViewController: NSViewController {
 
     private func applyCaptureModeToPicker() {
         switch selectedCaptureMode {
+        case .picked:
+            controlPanel.setPickedSource(pickedContent?.title)
+
         case .automatic:
             controlPanel.setCaptureSourceTitles(["Automatic (Window preferred)"], selectedIndex: 0)
 
@@ -327,6 +337,9 @@ final class MainViewController: NSViewController {
 
     private func selectedCaptureTarget() -> CaptureTarget {
         switch selectedCaptureMode {
+        case .picked:
+            // Nothing chosen yet: Start opens the picker before it gets this far.
+            return pickedContent.map { .picked($0) } ?? .window(nil)
         case .automatic:
             return .automatic
         case .display:
@@ -339,6 +352,9 @@ final class MainViewController: NSViewController {
     }
 
     private func applyCaptureTargetSelection() {
+        if selectedCaptureMode == .picked, pickedContent == nil {
+            return
+        }
         let target = selectedCaptureTarget()
 
         Task { [weak self] in
@@ -410,6 +426,10 @@ final class MainViewController: NSViewController {
             return displayID
         case .window(let windowID):
             return displayIDForWindow(windowID) ?? displayIDForScreen(view.window?.screen)
+        case .picked(let content):
+            return content.displayID
+                ?? displayIDForWindow(content.windowID)
+                ?? displayIDForScreen(view.window?.screen)
         case .automatic:
             return displayIDForFrontmostExternalWindow() ?? displayIDForScreen(view.window?.screen)
         }
@@ -510,6 +530,85 @@ final class MainViewController: NSViewController {
         }
     }
 
+    // MARK: - System picker
+
+    private func wireContentPicker() {
+        contentPicker.onPick = { [weak self] filter in
+            let box = UncheckedSendable(filter)
+            Task { @MainActor in
+                await self?.handlePicked(box.value)
+            }
+        }
+        contentPicker.onCancel = { [weak self] in
+            self?.startsAfterPick = false
+        }
+        contentPicker.onError = { [weak self] error in
+            guard let self else { return }
+            self.startsAfterPick = false
+            PipelineLog.shared.event("capture", "the system picker could not open: \(error.localizedDescription)")
+            self.controlPanel.setStatus(
+                "The macOS picker could not open. Use Auto, Display or Window instead.",
+                isError: true
+            )
+        }
+    }
+
+    private func presentContentPicker() {
+        // Our own windows by number as well: a build run from .build has no bundle identifier.
+        let ownWindows = NSApp.windows.compactMap { window -> CGWindowID? in
+            window.windowNumber > 0 ? CGWindowID(window.windowNumber) : nil
+        }
+        contentPicker.present(excludingWindowIDs: ownWindows)
+    }
+
+    private func handlePicked(_ filter: SCContentFilter) async {
+        guard let content = await PickedContent.resolve(filter) else {
+            startsAfterPick = false
+            controlPanel.setStatus("That choice has no window to show. Choose a window or a display.", isError: true)
+            return
+        }
+        pickedContent = content
+        selectedCaptureMode = .picked
+        controlPanel.setCaptureMode(.picked)
+        controlPanel.setPickedSource(content.title)
+        controlPanel.setStatus("Source: \(content.title)")
+        PipelineLog.shared.event("capture", "picked \(content.title)")
+        rememberPickedSource(content)
+
+        if startsAfterPick {
+            startsAfterPick = false
+            beginScaling()
+        } else {
+            applyCaptureTargetSelection()
+        }
+    }
+
+    /// A filter cannot be saved, so the app and window title are, and looked up again.
+    private func rememberPickedSource(_ content: PickedContent) {
+        let defaults = UserDefaults.standard
+        guard let bundleID = content.bundleID else {
+            defaults.removeObject(forKey: Self.lastSourceBundleKey)
+            defaults.removeObject(forKey: Self.lastSourceTitleKey)
+            return
+        }
+        defaults.set(bundleID, forKey: Self.lastSourceBundleKey)
+        defaults.set(content.windowTitle, forKey: Self.lastSourceTitleKey)
+    }
+
+    /// Shows the window chosen last time as the current source, if that app has one open.
+    private func restoreLastPickedSource() {
+        guard pickedContent == nil,
+              let bundleID = UserDefaults.standard.string(forKey: Self.lastSourceBundleKey) else { return }
+        let title = UserDefaults.standard.string(forKey: Self.lastSourceTitleKey) ?? ""
+        let candidates = windowSources.filter { $0.bundleID == bundleID }
+        // The same title if it is still there; otherwise the app's largest window (the
+        // list is sorted by area).
+        guard let source = candidates.first(where: { !title.isEmpty && $0.windowTitle == title }) ?? candidates.first else {
+            return
+        }
+        pickedContent = PickedContent(window: source.window)
+    }
+
     private func applyProfile(_ profile: Profile) {
         applySettings(profile.settings)
         applyCaptureConfiguration(profile.capture)
@@ -581,7 +680,19 @@ extension MainViewController: ControlPanelViewDelegate {
             presentTransientSheet(sheet)
             return
         }
+        // Nothing chosen yet: choosing is the first step of starting.
+        if selectedCaptureMode == .picked, pickedContent == nil {
+            startsAfterPick = true
+            panel.setStatus("Choose what to scale.")
+            presentContentPicker()
+            return
+        }
         beginScaling()
+    }
+
+    func controlPanelDidRequestChooseSource(_ panel: ControlPanelView) {
+        startsAfterPick = false
+        presentContentPicker()
     }
 
     private func beginScaling() {
@@ -659,12 +770,18 @@ extension MainViewController: ControlPanelViewDelegate {
 
     func controlPanel(_ panel: ControlPanelView, didSelectCaptureSourceAt index: Int) {
         switch selectedCaptureMode {
-        case .automatic:
+        case .picked, .automatic:
             break
         case .display:
             selectedDisplayIndex = max(index, 0)
+            if case .display(let id)? = displayEntries.indices.contains(selectedDisplayIndex)
+                ? displayEntries[selectedDisplayIndex].target : nil {
+                selectedDisplayID = id
+            }
         case .window:
             selectedWindowIndex = max(index, 0)
+            selectedWindowID = windowSources.indices.contains(selectedWindowIndex)
+                ? windowSources[selectedWindowIndex].windowID : nil
         }
         applyCaptureTargetSelection()
     }

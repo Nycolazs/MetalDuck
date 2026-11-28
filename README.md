@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.3.2-orange" alt="Version 1.3.2">
-  <img src="https://img.shields.io/badge/platform-macOS%2015%2B-blue" alt="macOS 15 or later">
+  <img src="https://img.shields.io/badge/platform-macOS%2015.2%2B-blue" alt="macOS 15.2 or later">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
@@ -109,7 +109,7 @@ Compared offline with a frame drawn at the true halfway point, a 40 pixel move s
 ## Requirements
 
 - Apple silicon Mac (M1 or later)
-- macOS 15 or later
+- macOS 15.2 or later
 - Screen Recording permission
 
 ## Build and run

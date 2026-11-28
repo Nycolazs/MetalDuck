@@ -1,18 +1,22 @@
 import CoreGraphics
 import Foundation
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 
-struct CaptureDisplaySource {
+struct CaptureDisplaySource: Sendable {
     let displayID: CGDirectDisplayID
     let title: String
 }
 
-struct CaptureWindowSource {
+struct CaptureWindowSource: @unchecked Sendable {
     let windowID: CGWindowID
     let title: String
+    let bundleID: String?
+    /// The window's own title, without the app's name.
+    let windowTitle: String
+    let window: SCWindow
 }
 
-struct CaptureSourceCatalog {
+struct CaptureSourceCatalog: Sendable {
     let displays: [CaptureDisplaySource]
     let windows: [CaptureWindowSource]
 
@@ -58,7 +62,13 @@ enum CaptureSourceCatalogProvider {
                 let baseTitle = trimmedWindowTitle.isEmpty ? "Untitled Window" : trimmedWindowTitle
                 let fullScreen = ScreenCaptureKitCaptureService.fillsDisplay(window.frame) ? " (full screen)" : ""
                 let title = "\(appName) • \(baseTitle)\(fullScreen)"
-                return CaptureWindowSource(windowID: window.windowID, title: title)
+                return CaptureWindowSource(
+                    windowID: window.windowID,
+                    title: title,
+                    bundleID: window.owningApplication?.bundleIdentifier,
+                    windowTitle: trimmedWindowTitle,
+                    window: window
+                )
             }
 
         return CaptureSourceCatalog(displays: displays, windows: Array(windows))

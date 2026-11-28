@@ -968,6 +968,8 @@ final class PipelineLog: @unchecked Sendable {
             return "display \(id)"
         case .window(let id):
             return "window \(id.map(String.init) ?? "unspecified")"
+        case .picked(let content):
+            return "picked \(content.title)"
         }
     }
 

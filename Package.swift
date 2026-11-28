@@ -4,7 +4,8 @@ import PackageDescription
 let package = Package(
     name: "MetalDuck",
     platforms: [
-        .macOS(.v15)
+        // 15.2: a filter from the system picker can say which window it holds.
+        .macOS("15.2")
     ],
     products: [
         .executable(name: "MetalDuck", targets: ["MetalDuck"])

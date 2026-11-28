@@ -74,7 +74,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <key>CFBundleIconFile</key>
   <string>AppIcon.icns</string>
   <key>LSMinimumSystemVersion</key>
-  <string>15.0</string>
+  <string>15.2</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
 </dict>

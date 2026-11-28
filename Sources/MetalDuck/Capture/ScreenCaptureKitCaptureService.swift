@@ -59,23 +59,10 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         if stream != nil {
             await stop()
         }
-        let shareableContent = try await SCShareableContent.current
-        let selection = try resolveSelection(in: shareableContent)
-        let filter = makeFilter(for: selection, shareableContent: shareableContent)
-        let captureSize = resolveCaptureSize(for: selection, filter: filter)
-
-        switch selection {
-        case .window(let window):
-            self.trackedWindowID = window.windowID
-            self.trackedBundleID = window.owningApplication?.bundleIdentifier
-            self.trackedPID = window.owningApplication?.processID
-            self.trackedDisplayID = nil
-        case .display(let display):
-            self.trackedDisplayID = display.displayID
-            self.trackedWindowID = nil
-            self.trackedBundleID = nil
-            self.trackedPID = nil
-        }
+        let source = try await resolveSource()
+        let filter = source.filter
+        let captureSize = resolveCaptureSize(for: filter)
+        track(source)
 
         let streamConfiguration = SCStreamConfiguration()
         streamConfiguration.width = captureSize.width
@@ -126,7 +113,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         recentPictureChange = []
         startFollowingWindow()
         PipelineLog.shared.logCaptureStarted(
-            target: Self.describe(selection),
+            target: source.description,
             pixelWidth: captureSize.width,
             pixelHeight: captureSize.height,
             configuredFPS: captureConfiguration.framesPerSecond,
@@ -156,11 +143,40 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
 
     func reconfigure(target: CaptureTarget) async throws {
         self.target = target
-        let isRunning = stream != nil
-        if isRunning {
-            await stop()
-            try await start()
+        guard let stream else { return }
+        // A window from the picker comes with its filter, so the running stream can switch
+        // to it in place. Anything else, or a refusal, restarts the stream.
+        if case .picked(let content) = target, content.windowID != nil, let filter = content.filter,
+           let configuration = streamConfiguration {
+            do {
+                try await stream.updateContentFilter(filter)
+                let size = resolveCaptureSize(for: filter)
+                configuration.width = size.width
+                configuration.height = size.height
+                try await stream.updateConfiguration(configuration)
+                configuredAspect = CGFloat(size.width) / CGFloat(max(size.height, 1))
+                track(Source(
+                    filter: filter,
+                    windowID: content.windowID,
+                    processID: content.processID,
+                    bundleID: content.bundleID,
+                    displayID: nil,
+                    description: "picked window \(content.windowID ?? 0) \"\(content.title)\""
+                ))
+                sampleQueue.async {
+                    self.lastPictureSamples = []
+                    self.recentPictureChange = []
+                    self.followCandidate = nil
+                }
+                startFollowingWindow()
+                PipelineLog.shared.event("capture", "source changed without a restart: \(content.title), stream \(size.width)x\(size.height)")
+                return
+            } catch {
+                PipelineLog.shared.event("capture", "could not switch the running stream (\(error.localizedDescription)); restarting it")
+            }
         }
+        await stop()
+        try await start()
     }
 
     func reconfigure(configuration: CaptureConfiguration) async throws {
@@ -177,8 +193,72 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         case window(SCWindow)
     }
 
+    /// What the stream captures, and the identifiers used to follow it.
+    private struct Source {
+        let filter: SCContentFilter
+        let windowID: CGWindowID?
+        let processID: pid_t?
+        let bundleID: String?
+        let displayID: CGDirectDisplayID?
+        let description: String
+    }
+
+    private func track(_ source: Source) {
+        trackedWindowID = source.windowID
+        trackedPID = source.processID
+        trackedBundleID = source.bundleID
+        trackedDisplayID = source.displayID
+    }
+
+    private func resolveSource() async throws -> Source {
+        // A window chosen in the system picker is captured with the picker's own filter.
+        if case .picked(let content) = target, content.windowID != nil, let filter = content.filter {
+            return Source(
+                filter: filter,
+                windowID: content.windowID,
+                processID: content.processID,
+                bundleID: content.bundleID,
+                displayID: nil,
+                description: "picked window \(content.windowID ?? 0) \"\(content.title)\""
+            )
+        }
+
+        let shareableContent = try await SCShareableContent.current
+        let selection = try resolveSelection(in: shareableContent)
+        let filter = makeFilter(for: selection, shareableContent: shareableContent)
+        switch selection {
+        case .window(let window):
+            return Source(
+                filter: filter,
+                windowID: window.windowID,
+                processID: window.owningApplication?.processID,
+                bundleID: window.owningApplication?.bundleIdentifier,
+                displayID: nil,
+                description: Self.describe(selection)
+            )
+        case .display(let display):
+            return Source(
+                filter: filter,
+                windowID: nil,
+                processID: nil,
+                bundleID: nil,
+                displayID: display.displayID,
+                description: Self.describe(selection)
+            )
+        }
+    }
+
     private func resolveSelection(in shareableContent: SCShareableContent) throws -> Selection {
         let currentPID = ProcessInfo.processInfo.processIdentifier
+
+        // A picked display goes the same way as one from the list, so its filter leaves
+        // out MetalDuck's own windows. A picked window only reaches here without a filter.
+        let target: CaptureTarget
+        if case .picked(let content) = self.target {
+            target = content.displayID.map { .display($0) } ?? .window(content.windowID)
+        } else {
+            target = self.target
+        }
 
         switch target {
         case .display(let requestedDisplayID):
@@ -232,6 +312,9 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
             }
             return .window(window)
 
+        case .picked:
+            throw ScreenCaptureServiceError.noShareableWindow
+
         case .automatic:
             let windows = shareableContent.windows.filter { $0.isOnScreen && $0.windowLayer == 0 }
             if let window = windows.first(where: { $0.owningApplication?.processID != currentPID }) {
@@ -258,7 +341,7 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         }
     }
 
-    private func resolveCaptureSize(for selection: Selection, filter: SCContentFilter) -> (width: Int, height: Int) {
+    private func resolveCaptureSize(for filter: SCContentFilter) -> (width: Int, height: Int) {
         let info = SCShareableContent.info(for: filter)
         let nativeWidth = max(1, Int(info.contentRect.width * CGFloat(info.pointPixelScale)))
         let nativeHeight = max(1, Int(info.contentRect.height * CGFloat(info.pointPixelScale)))
@@ -269,21 +352,10 @@ final class ScreenCaptureKitCaptureService: NSObject, FrameCaptureService, @unch
         guard Double(nativeWidth * nativeHeight) > budgetArea else {
             return (nativeWidth, nativeHeight)
         }
-        let aspect = max(0.1, captureAspect(for: selection))
+        let aspect = max(0.1, Double(nativeWidth) / Double(nativeHeight))
         let width = max(1, Int((budgetArea * aspect).squareRoot().rounded()))
         let height = max(1, Int((Double(width) / Double(aspect)).rounded()))
         return (width: width, height: height)
-    }
-
-    private func captureAspect(for selection: Selection) -> CGFloat {
-        switch selection {
-        case .display(let display):
-            return CGFloat(max(1, display.width)) / CGFloat(max(1, display.height))
-        case .window(let window):
-            let width = max(1.0, window.frame.width)
-            let height = max(1.0, window.frame.height)
-            return width / height
-        }
     }
 
     private func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {

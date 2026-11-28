@@ -2,12 +2,16 @@ import AppKit
 import Foundation
 
 enum CaptureModeChoice: Int, CaseIterable {
+    /// The system's window, app and display picker.
+    case picked
     case automatic
     case display
     case window
 
     var title: String {
         switch self {
+        case .picked:
+            return "Choose"
         case .automatic:
             return "Automatic"
         case .display:
@@ -19,6 +23,8 @@ enum CaptureModeChoice: Int, CaseIterable {
 
     var shortTitle: String {
         switch self {
+        case .picked:
+            return "Choose"
         case .automatic:
             return "Auto"
         case .display:
@@ -34,6 +40,7 @@ protocol ControlPanelViewDelegate: AnyObject {
     func controlPanelDidPressStart(_ panel: ControlPanelView)
     func controlPanelDidPressStop(_ panel: ControlPanelView)
     func controlPanelDidRequestRefreshSources(_ panel: ControlPanelView)
+    func controlPanelDidRequestChooseSource(_ panel: ControlPanelView)
 
     func controlPanel(_ panel: ControlPanelView, didSelectCaptureMode mode: CaptureModeChoice)
     func controlPanel(_ panel: ControlPanelView, didSelectCaptureSourceAt index: Int)
@@ -108,6 +115,8 @@ final class ControlPanelView: NSView {
     private let sourceTitleLabel = GlassLabel.make("Window", font: GlassFont.body)
     private let sourceIcon = GlassSymbol.view("macwindow", size: 13)
     private let autoSourceLabel = GlassLabel.make("Frontmost window, picked automatically", font: GlassFont.body, color: .secondaryLabelColor)
+    private let pickedSourceLabel = GlassLabel.make("No source chosen", font: GlassFont.body, color: .secondaryLabelColor)
+    private let chooseSourceButton = GlassActionButton(title: "Choose…", symbol: "macwindow.badge.plus", style: .neutral, height: 32)
     private let sourcePicker = NSStackView()
     private let captureCursorSwitch = GlassSwitch()
     private let captureFPSSlider = NSSlider(value: 30, minValue: 15, maxValue: 120, target: nil, action: nil)
@@ -308,6 +317,16 @@ final class ControlPanelView: NSView {
         updateSourceRow(for: mode, animated: false)
     }
 
+    /// The source chosen in the system picker, or nil when nothing is chosen yet.
+    func setPickedSource(_ title: String?) {
+        pickedSourceLabel.stringValue = title ?? "No source chosen"
+        pickedSourceLabel.textColor = title == nil ? .secondaryLabelColor : .labelColor
+        pickedSourceLabel.toolTip = title
+        chooseSourceButton.toolTip = title == nil
+            ? "Choose a window, an app or a display"
+            : "Choose a different window, app or display"
+    }
+
     func setCaptureSourceTitles(_ titles: [String], selectedIndex: Int?) {
         if titles.isEmpty {
             captureSourceDropdown.items = ["No source found"]
@@ -426,6 +445,10 @@ final class ControlPanelView: NSView {
             guard let self, !self.isApplyingValues else { return }
             self.delegate?.controlPanel(self, didSelectCaptureSourceAt: index)
         }
+        chooseSourceButton.setAccessibilityLabel("Choose a window, an app or a display")
+        chooseSourceButton.toolTip = "Choose a window, an app or a display"
+        chooseSourceButton.target = self
+        chooseSourceButton.action = #selector(handleChooseSource)
         refreshSourcesButton.toolTip = "Refresh windows and displays"
         refreshSourcesButton.setAccessibilityLabel("Refresh windows and displays")
         refreshSourcesButton.target = self
@@ -886,7 +909,7 @@ final class ControlPanelView: NSView {
 
         let modeIcon = GlassSymbol.view("rectangle.on.rectangle", size: 13)
         let modeTitle = GlassLabel.make("Mode", font: GlassFont.body)
-        modeTitle.toolTip = "Capture a window, a whole display, or let MetalDuck pick."
+        modeTitle.toolTip = "Choose opens the macOS picker. Auto, Display and Window are the older lists."
         group.addRow(makeWideRow(icon: modeIcon, title: modeTitle, control: captureModeControl))
         group.addRow(makeWideRow(icon: sourceIcon, title: sourceTitleLabel, control: sourcePicker))
         configureSourcePicker()
@@ -924,23 +947,29 @@ final class ControlPanelView: NSView {
         autoSourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         autoSourceLabel.setContentHuggingPriority(.init(1), for: .horizontal)
         captureSourceDropdown.setContentHuggingPriority(.init(1), for: .horizontal)
+        pickedSourceLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        pickedSourceLabel.setContentHuggingPriority(.init(1), for: .horizontal)
+        chooseSourceButton.setContentHuggingPriority(.required, for: .horizontal)
+        chooseSourceButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         sourcePicker.orientation = .horizontal
         sourcePicker.distribution = .fill
         sourcePicker.alignment = .centerY
         sourcePicker.spacing = 6
         sourcePicker.detachesHiddenViews = true
-        for view in [captureSourceDropdown, refreshSourcesButton, autoSourceLabel] as [NSView] {
+        for view in [pickedSourceLabel, chooseSourceButton, captureSourceDropdown, refreshSourcesButton, autoSourceLabel] as [NSView] {
             sourcePicker.addArrangedSubview(view)
         }
-        updateSourceRow(for: .automatic, animated: false)
+        updateSourceRow(for: .picked, animated: false)
     }
 
     private func updateSourceRow(for mode: CaptureModeChoice, animated: Bool) {
-        let isAuto = mode == .automatic
         let title: String
         let symbol: String
         switch mode {
+        case .picked:
+            title = "Source"
+            symbol = "macwindow.on.rectangle"
         case .automatic:
             title = "Source"
             symbol = "sparkle.magnifyingglass"
@@ -960,8 +989,17 @@ final class ControlPanelView: NSView {
             }
         }
 
-        let show: [NSView] = isAuto ? [autoSourceLabel] : [captureSourceDropdown, refreshSourcesButton]
-        let hide: [NSView] = isAuto ? [captureSourceDropdown, refreshSourcesButton] : [autoSourceLabel]
+        let show: [NSView]
+        switch mode {
+        case .picked:
+            show = [pickedSourceLabel, chooseSourceButton]
+        case .automatic:
+            show = [autoSourceLabel]
+        case .display, .window:
+            show = [captureSourceDropdown, refreshSourcesButton]
+        }
+        let all: [NSView] = [pickedSourceLabel, chooseSourceButton, captureSourceDropdown, refreshSourcesButton, autoSourceLabel]
+        let hide = all.filter { view in !show.contains { $0 === view } }
         hide.forEach { $0.isHidden = true }
         for view in show {
             view.isHidden = false
@@ -1178,6 +1216,10 @@ final class ControlPanelView: NSView {
             refreshSourcesButton.imageView.addSymbolEffect(.rotate, options: .nonRepeating)
         }
         delegate?.controlPanelDidRequestRefreshSources(self)
+    }
+
+    @objc private func handleChooseSource() {
+        delegate?.controlPanelDidRequestChooseSource(self)
     }
 
     @objc private func handleAddProfile() {
